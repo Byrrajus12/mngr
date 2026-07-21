@@ -11,6 +11,9 @@
   background: transparent;
   cursor: pointer;
   pointer-events: auto;
+  outline: none;
+  transition: none;
+  -webkit-tap-highlight-color: transparent;
 }
 
 .filament.expanded {
@@ -28,6 +31,7 @@
   box-shadow: -1px 0 5px rgba(0, 0, 0, 0.18);
   content: "";
   opacity: .75;
+  transition: none;
 }
 
 .idleLine {
@@ -105,8 +109,9 @@
   font-size: 11px;
   pointer-events: auto;
   opacity: 0;
+  visibility: hidden;
   transform: translateX(14px) translateY(-50%);
-  transition: opacity .34s var(--ease-out), transform .4s var(--spring);
+  transition: opacity .15s ease, transform .18s ease, visibility 0s linear .18s;
   box-shadow: 0 10px 30px -10px rgba(0, 0, 0, .6);
 }
 
@@ -120,14 +125,12 @@
   flex: none;
 }
 
-.filament.peeking .seglabel {
-  opacity: 1;
-  transform: translateX(0) translateY(-50%);
-}
-
+.filament.peeking .seglabel,
 .seglabel.attnchip {
   opacity: 1;
+  visibility: visible;
   transform: translateX(0) translateY(-50%);
+  transition: opacity .34s var(--ease-out), transform .4s var(--spring), visibility 0s;
 }
 
 @keyframes idlebreath {

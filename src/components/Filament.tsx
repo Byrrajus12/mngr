@@ -4,7 +4,7 @@ import type { Session } from "../types";
 type FilamentProps = {
   sessions: Session[];
   expanded: boolean;
-  peeking: boolean;
+  peekReason: "hover" | "attention" | null;
   flash: Set<string>;
   now: number;
   onExpand: () => void;
@@ -62,13 +62,13 @@ function phaseFor(sessionId: string) {
   return `${(hash / 100).toFixed(2)}s`;
 }
 
-function Filament({ sessions, expanded, peeking, flash, now, onExpand, onPeek, onUnpeek }: FilamentProps) {
+function Filament({ sessions, expanded, peekReason, flash, now, onExpand, onPeek, onUnpeek }: FilamentProps) {
   const active = sessions;
   const count = active.length;
 
   return (
     <button
-      className={`filament ${expanded ? "expanded" : ""} ${peeking ? "peeking" : ""}`}
+      className={`filament ${expanded ? "expanded" : ""} ${peekReason === "hover" ? "peeking" : ""}`}
       type="button"
       aria-label="Expand mngr sessions"
       onClick={onExpand}

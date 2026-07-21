@@ -16,15 +16,18 @@
     0 16px 55px -34px rgba(0, 0, 0, 0.7),
     inset 0 1px 0 rgba(255, 255, 255, 0.05);
   opacity: 0;
+  visibility: hidden;
   pointer-events: none;
   transform: translateY(-50%) translateX(30px);
-  transition: opacity .3s ease, transform .45s var(--spring);
+  transition: opacity .22s ease, transform .3s ease, visibility 0s linear .25s;
 }
 
 .panel.open {
   opacity: 1;
+  visibility: visible;
   pointer-events: auto;
   transform: translateY(-50%) translateX(0);
+  transition: opacity .3s ease, transform .45s var(--spring), visibility 0s;
 }
 
 .phead {

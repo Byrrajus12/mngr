@@ -1,16 +1,19 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useEffect, useMemo, useRef, useState } from "react";
+import DemoPanel from "./components/DemoPanel";
 import Filament from "./components/Filament";
 import Panel from "./components/Panel";
 import type { Session, SessionStatus } from "./types";
 
 type WindowMode = "collapsed" | "peek" | "expanded";
+type PeekReason = "hover" | "attention" | null;
+
+const DEMO_PROJECTS = ["mngr", "api-server", "web-ui", "dotfiles", "infra"];
 
 async function setWindowMode(mode: WindowMode) {
   if (mode === "expanded") await invoke("expand_panel");
-  if (mode === "peek") await invoke("peek_panel");
-  if (mode === "collapsed") await invoke("collapse_panel");
 }
 
 function needsAttention(status: SessionStatus) {
@@ -19,12 +22,15 @@ function needsAttention(status: SessionStatus) {
 
 function App() {
   const [sessions, setSessions] = useState<Session[]>([]);
+  const [demoSessions, setDemoSessions] = useState<Session[]>([]);
   const [mode, setMode] = useState<WindowMode>("collapsed");
+  const [peekReason, setPeekReason] = useState<PeekReason>(null);
   const [flash, setFlash] = useState<Set<string>>(() => new Set());
   const [dismissed, setDismissed] = useState<Set<string>>(() => new Set());
   const [now, setNow] = useState(() => Date.now());
 
   const leaveTimer = useRef<number | undefined>(undefined);
+  const demoId = useRef(1);
   const modeRef = useRef<WindowMode>(mode);
   const hoveredRef = useRef(false);
   const prevStatusRef = useRef<Map<string, SessionStatus>>(new Map());
@@ -39,9 +45,11 @@ function App() {
     return () => window.clearInterval(timer);
   }, []);
 
+
   async function collapse() {
     window.clearTimeout(leaveTimer.current);
     await setWindowMode("collapsed");
+    setPeekReason(null);
     setMode("collapsed");
   }
 
@@ -49,7 +57,9 @@ function App() {
     if (modeRef.current !== "collapsed") return;
     window.clearTimeout(leaveTimer.current);
     await setWindowMode("peek");
-    setMode("peek");
+    requestAnimationFrame(() => {
+      setMode("peek");
+    });
   }
 
   async function expand() {
@@ -68,6 +78,7 @@ function App() {
 
   function handlePeek() {
     hoveredRef.current = true;
+    setPeekReason("hover");
     peek();
   }
 
@@ -108,24 +119,54 @@ function App() {
     return () => document.removeEventListener("keydown", onKeyDown);
   }, []);
 
+  // Cursor stream from the Rust watcher drives click-through: the window is
+  // click-through everywhere except over interactive UI, and also drives
+  // un-peek now that mouseleave no longer fires reliably once ignoring
+  // cursor events.
+  const ignoringRef = useRef(true);
+  const unpeekRef = useRef(handleUnpeek);
+  unpeekRef.current = handleUnpeek;
+
+  useEffect(() => {
+    const unlisten = listen<{ x: number; y: number }>("cursor-pos", (event) => {
+      const { x, y } = event.payload;
+      const el = document.elementFromPoint(x, y);
+      const interactive = !!el?.closest(".filament, .panel, .demoPanel");
+      const shouldIgnore = !interactive;
+
+      if (ignoringRef.current !== shouldIgnore) {
+        ignoringRef.current = shouldIgnore;
+        getCurrentWindow().setIgnoreCursorEvents(shouldIgnore);
+      }
+
+      if (modeRef.current === "peek" && !interactive) {
+        unpeekRef.current();
+      }
+    });
+    return () => {
+      unlisten.then((dispose) => dispose());
+    };
+  }, []);
+
   // Attention flash: when a session newly needs attention while collapsed,
   // peek and surface its label for 3s.
   useEffect(() => {
     const prev = prevStatusRef.current;
     const newlyAttention: string[] = [];
+    const allSessions = [...sessions, ...demoSessions];
 
-    for (const session of sessions) {
+    for (const session of allSessions) {
       const wasAttn = needsAttention(prev.get(session.session_id) ?? "Idle");
       if (needsAttention(session.status) && !wasAttn) {
         newlyAttention.push(session.session_id);
       }
     }
 
-    prevStatusRef.current = new Map(sessions.map((s) => [s.session_id, s.status]));
+    prevStatusRef.current = new Map(allSessions.map((s) => [s.session_id, s.status]));
 
     if (newlyAttention.length === 0 || modeRef.current !== "collapsed") return;
 
-    invoke("peek_panel").catch((error) => console.error("peek_panel failed", error));
+    setPeekReason("attention");
     setMode("peek");
     setFlash((current) => {
       const next = new Set(current);
@@ -148,16 +189,16 @@ function App() {
       flashTimers.current.set(id, timer);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessions]);
+  }, [demoSessions, sessions]);
 
   const activeSessions = useMemo(
     () =>
-      sessions.filter(
+      [...sessions, ...demoSessions].filter(
         (session) =>
           !dismissed.has(session.session_id) &&
           (session.status !== "Done" || now - session.last_event_at < 30 * 60 * 1000),
       ),
-    [dismissed, now, sessions],
+    [demoSessions, dismissed, now, sessions],
   );
 
   function dismissSession(id: string) {
@@ -168,11 +209,77 @@ function App() {
     });
   }
 
+  function addDemoSession() {
+    const id = demoId.current++;
+    const projectName = DEMO_PROJECTS[(id - 1) % DEMO_PROJECTS.length];
+    const timestamp = Date.now();
+    setDemoSessions((current) => [
+      ...current,
+      {
+        session_id: `demo-${id}`,
+        started_at: timestamp,
+        last_event_at: timestamp,
+        status: "Working",
+        project_name: projectName,
+        project_path: `C:\\demo\\${projectName}`,
+        agent_type: id % 2 === 0 ? "codex" : "claude-code",
+        current_tool: null,
+        pending_approval: null,
+      },
+    ]);
+  }
+
+  function removeDemoSession() {
+    setDemoSessions((current) => current.slice(0, -1));
+  }
+
+  function updateRandomWorkingDemoSession(update: (session: Session) => Session) {
+    setDemoSessions((current) => {
+      const working = current
+        .map((session, index) => ({ session, index }))
+        .filter(({ session }) => session.status === "Working");
+      if (working.length === 0) return current;
+
+      const { index } = working[Math.floor(Math.random() * working.length)];
+      return current.map((session, sessionIndex) => (sessionIndex === index ? update(session) : session));
+    });
+  }
+
+  function triggerDemoPermission() {
+    updateRandomWorkingDemoSession((session) => ({
+      ...session,
+      status: "WaitingForApproval",
+      last_event_at: Date.now(),
+      current_tool: "Bash",
+      pending_approval: {
+        tool_name: "Bash",
+        tool_input: { command: "rm -rf node_modules && npm ci" },
+      },
+    }));
+  }
+
+  function triggerDemoQuestion() {
+    updateRandomWorkingDemoSession((session) => ({
+      ...session,
+      status: "WaitingForInput",
+      last_event_at: Date.now(),
+      current_tool: null,
+      pending_approval: null,
+    }));
+  }
+
+  function completeDemoTask() {
+    updateRandomWorkingDemoSession((session) => ({
+      ...session,
+      status: "Done",
+      last_event_at: Date.now(),
+      current_tool: null,
+      pending_approval: null,
+    }));
+  }
+
   return (
-    <div
-      className={`appShell mode-${mode}`}
-      onMouseLeave={mode === "peek" ? handleUnpeek : undefined}
-    >
+    <div className={`appShell mode-${mode}`}>
       <Panel
         sessions={activeSessions}
         expanded={mode === "expanded"}
@@ -183,13 +290,23 @@ function App() {
       <Filament
         sessions={activeSessions}
         expanded={mode === "expanded"}
-        peeking={mode === "peek"}
+        peekReason={mode === "peek" ? peekReason : null}
         flash={flash}
         now={now}
         onExpand={expand}
         onPeek={handlePeek}
         onUnpeek={handleUnpeek}
       />
+      {import.meta.env.DEV ? (
+        <DemoPanel
+          agentCount={demoSessions.length}
+          onAddAgent={addDemoSession}
+          onRemoveAgent={removeDemoSession}
+          onTriggerPermission={triggerDemoPermission}
+          onTriggerQuestion={triggerDemoQuestion}
+          onCompleteTask={completeDemoTask}
+        />
+      ) : null}
     </div>
   );
 }

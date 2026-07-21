@@ -4,6 +4,7 @@ import App from "./App";
 import "./styles/variables.css";
 import "./styles/filament.css";
 import "./styles/panel.css";
+import "./styles/demo.css";
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>

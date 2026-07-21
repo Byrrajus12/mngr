@@ -9,9 +9,6 @@ use tauri::{Emitter, Manager, PhysicalPosition, PhysicalSize, State};
 use tokio::time::{sleep, Duration};
 
 const PIPE_NAME: &str = r"\\.\pipe\mngr";
-const COLLAPSED_WIDTH: f64 = 18.0;
-const PEEK_WIDTH: f64 = 280.0;
-const EXPANDED_WIDTH: f64 = 460.0;
 const DONE_AFTER_MS: u64 = 5 * 60 * 1000;
 const REMOVE_AFTER_MS: u64 = 30 * 60 * 1000;
 const CLAUDE_EVENTS: &[&str] = &[
@@ -370,22 +367,24 @@ pub fn run() {
             position_overlay_window(app.handle());
             start_pipe_listener(app.handle().clone());
             start_session_cleanup(app.handle().clone());
+            start_cursor_watcher(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             get_sessions,
             install_claude_hooks,
-            expand_panel,
-            peek_panel,
-            collapse_panel
+            expand_panel
         ])
         .run(tauri::generate_context!())
         .expect("error while running mngr");
 }
 
 fn position_overlay_window(app: &tauri::AppHandle) {
-    if let Err(error) = resize_overlay_window(app, COLLAPSED_WIDTH) {
+    if let Err(error) = size_overlay_window_to_monitor(app) {
         eprintln!("failed to position overlay window: {error}");
+    }
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.set_ignore_cursor_events(true);
     }
 }
 
@@ -394,20 +393,10 @@ fn expand_panel(app: tauri::AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.set_focus();
     }
-    resize_overlay_window(&app, EXPANDED_WIDTH).map_err(|error| error.to_string())
+    Ok(())
 }
 
-#[tauri::command]
-fn peek_panel(app: tauri::AppHandle) -> Result<(), String> {
-    resize_overlay_window(&app, PEEK_WIDTH).map_err(|error| error.to_string())
-}
-
-#[tauri::command]
-fn collapse_panel(app: tauri::AppHandle) -> Result<(), String> {
-    resize_overlay_window(&app, COLLAPSED_WIDTH).map_err(|error| error.to_string())
-}
-
-fn resize_overlay_window(app: &tauri::AppHandle, logical_width: f64) -> tauri::Result<()> {
+fn size_overlay_window_to_monitor(app: &tauri::AppHandle) -> tauri::Result<()> {
     let Some(window) = app.get_webview_window("main") else {
         return Ok(());
     };
@@ -416,18 +405,30 @@ fn resize_overlay_window(app: &tauri::AppHandle, logical_width: f64) -> tauri::R
         return Ok(());
     };
 
-    let scale = monitor.scale_factor();
     let size = monitor.size();
     let pos = monitor.position();
 
-    let physical_width = (logical_width * scale).round().max(1.0) as i32;
-    let height = size.height;
-    let x = pos.x + size.width as i32 - physical_width;
-    let y = pos.y;
-
-    window.set_size(PhysicalSize::new(physical_width as u32, height))?;
-    window.set_position(PhysicalPosition::new(x, y))?;
+    window.set_size(PhysicalSize::new(size.width, size.height))?;
+    window.set_position(PhysicalPosition::new(pos.x, pos.y))?;
     Ok(())
+}
+
+fn start_cursor_watcher(app: tauri::AppHandle) {
+    std::thread::spawn(move || {
+        let mut last: Option<(i32, i32)> = None;
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(16));
+            let Some(window) = app.get_webview_window("main") else { continue };
+            let Ok(cursor) = window.cursor_position() else { continue };
+            let Ok(win_pos) = window.outer_position() else { continue };
+            let scale = window.scale_factor().unwrap_or(1.0);
+            let x = ((cursor.x - win_pos.x as f64) / scale).round() as i32;
+            let y = ((cursor.y - win_pos.y as f64) / scale).round() as i32;
+            if last == Some((x, y)) { continue; }
+            last = Some((x, y));
+            let _ = window.emit("cursor-pos", serde_json::json!({ "x": x, "y": y }));
+        }
+    });
 }
 
 fn start_session_cleanup(app: tauri::AppHandle) {
