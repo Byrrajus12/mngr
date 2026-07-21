@@ -1,0 +1,346 @@
+.panel {
+  position: fixed;
+  right: 12px;
+  top: 50%;
+  z-index: 35;
+  display: flex;
+  flex-direction: column;
+  width: 380px;
+  max-height: 88vh;
+  overflow: hidden;
+  padding: 16px;
+  background: var(--glass);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 16px;
+  box-shadow:
+    0 16px 55px -34px rgba(0, 0, 0, 0.7),
+    inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-50%) translateX(30px);
+  transition: opacity .3s ease, transform .45s var(--spring);
+}
+
+.panel.open {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(-50%) translateX(0);
+}
+
+.phead {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+
+.wm {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: .5px;
+  color: #f2f5f8;
+  text-transform: lowercase;
+}
+
+.agg {
+  margin-top: 3px;
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.usage {
+  margin-top: 8px;
+  width: 150px;
+}
+
+.usage .txt {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 4px;
+  color: rgba(255, 255, 255, 0.42);
+  font-size: 10px;
+}
+
+.usage .track {
+  height: 4px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.usage .fill {
+  width: 62%;
+  height: 100%;
+  border-radius: 2px;
+  background: linear-gradient(90deg, var(--blue), var(--emerald));
+}
+
+.pclose {
+  padding: 2px 6px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.4);
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.pclose:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.cards {
+  flex: 1;
+  overflow-x: hidden;
+  overflow-y: auto;
+  margin: 0 -4px;
+  padding: 2px 4px 0;
+}
+
+.emptyPanel {
+  padding: 8px 2px;
+  color: rgba(255, 255, 255, 0.4);
+  font-size: 11.5px;
+}
+
+.card {
+  position: relative;
+  overflow: hidden;
+  margin-bottom: 9px;
+  padding: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.035);
+  animation: cardEnter .5s var(--card-spring) both;
+  will-change: transform, opacity;
+}
+
+.card:last-child {
+  margin-bottom: 0;
+}
+
+.card.attention-req {
+  border-color: rgba(251, 191, 36, 0.28);
+  background: rgba(251, 191, 36, 0.05);
+}
+
+.card.attention-q {
+  border-color: rgba(96, 165, 250, 0.28);
+  background: rgba(96, 165, 250, 0.05);
+}
+
+.card.done {
+  border-color: rgba(255, 255, 255, 0.14);
+  cursor: pointer;
+}
+
+.cardResolved {
+  margin-top: 9px;
+  color: var(--emerald);
+  font-size: 11px;
+  opacity: .85;
+}
+
+.top {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.glyph {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.proj {
+  color: #eef2f6;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.act {
+  margin-top: 1px;
+  color: rgba(255, 255, 255, 0.52);
+  font-size: 11px;
+}
+
+.meta {
+  flex: none;
+  margin-left: auto;
+  text-align: right;
+}
+
+.sdot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-bottom: 3px;
+  border-radius: 50%;
+  box-shadow: 0 0 8px currentColor;
+}
+
+.sdot.working {
+  color: var(--emerald);
+  background: var(--emerald);
+  animation: breathe 3s ease-in-out infinite;
+}
+
+.sdot.attention-req {
+  color: var(--amber);
+  background: var(--amber);
+}
+
+.sdot.attention-q {
+  color: var(--blue);
+  background: var(--blue);
+}
+
+.sdot.done {
+  color: #fff;
+  background: #fff;
+}
+
+.el {
+  color: rgba(255, 255, 255, 0.45);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.jump {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  border: 0;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.3);
+  cursor: pointer;
+  font-size: 12px;
+  opacity: 0;
+  transition: opacity .2s;
+}
+
+.card:hover .jump {
+  opacity: 1;
+}
+
+.cmdchip {
+  margin-top: 10px;
+  overflow: hidden;
+  padding: 7px 9px;
+  border: 1px solid rgba(251, 191, 36, 0.2);
+  border-radius: 7px;
+  background: rgba(251, 191, 36, 0.08);
+  color: #e6d38a;
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.btns {
+  display: flex;
+  gap: 7px;
+  margin-top: 9px;
+}
+
+.btns button,
+.pill {
+  flex: none;
+  cursor: pointer;
+  font-family: var(--font);
+  font-size: 11px;
+  transition: transform .1s, background .15s;
+}
+
+.btns button:active,
+.pill:active {
+  transform: scale(0.94);
+}
+
+.allow {
+  padding: 6px 12px;
+  border: 1px solid rgba(52, 211, 153, 0.4);
+  border-radius: 8px;
+  background: rgba(52, 211, 153, 0.16);
+  color: #8ff0c8;
+}
+
+.allow:hover {
+  background: rgba(52, 211, 153, 0.26);
+}
+
+.deny {
+  padding: 6px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.6);
+}
+
+.deny:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.qtext {
+  margin-top: 9px;
+  color: #dbe2ea;
+  font-size: 11.5px;
+  line-height: 1.4;
+}
+
+.pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 9px;
+}
+
+.pill {
+  padding: 5px 12px;
+  border: 1px solid rgba(96, 165, 250, 0.3);
+  border-radius: 14px;
+  background: rgba(96, 165, 250, 0.1);
+  color: #bcd6ff;
+}
+
+.pill:hover {
+  background: rgba(96, 165, 250, 0.2);
+}
+
+.checkwrap {
+  width: 22px;
+  height: 22px;
+}
+
+.checkwrap path {
+  stroke-dasharray: 24;
+  stroke-dashoffset: 24;
+  animation: draw .5s ease .05s forwards;
+}
+
+.dismiss {
+  margin-top: 7px;
+  color: rgba(255, 255, 255, 0.35);
+  font-size: 10px;
+}
+
+@keyframes cardEnter {
+  from {
+    opacity: 0;
+    transform: translateY(14px) scale(0.9);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes draw {
+  to { stroke-dashoffset: 0; }
+}

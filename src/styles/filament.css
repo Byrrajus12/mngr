@@ -1,0 +1,146 @@
+.filament {
+  position: fixed;
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 40;
+  width: 18px;
+  height: 40vh;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+.filament.expanded {
+  cursor: default;
+}
+
+.filament::before {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 9px;
+  border-radius: 5px 0 0 5px;
+  background: rgba(0, 0, 0, 0.28);
+  box-shadow: -1px 0 5px rgba(0, 0, 0, 0.18);
+  content: "";
+  opacity: .75;
+}
+
+.idleLine {
+  position: absolute;
+  right: 4px;
+  top: 0;
+  height: 100%;
+  width: 1px;
+  background: rgba(174, 184, 199, 0.55);
+  border-radius: 1px;
+  opacity: 0;
+  transition: opacity .6s ease;
+}
+
+.idleLine.show {
+  animation: idlebreath 10s ease-in-out infinite;
+}
+
+.seg {
+  position: absolute;
+  right: 0;
+  display: block;
+  border-radius: 3px 0 0 3px;
+  transition:
+    width .5s var(--spring),
+    background-color .45s var(--ease-out),
+    box-shadow .5s var(--ease-out),
+    opacity .4s ease,
+    top .55s var(--spring),
+    height .55s var(--spring);
+  will-change: top, height, width;
+}
+
+.seg.working {
+  background: var(--emerald);
+  box-shadow: 0 0 5px rgba(52, 211, 153, 0.33);
+  animation: breathe 4s ease-in-out infinite;
+}
+
+.seg.approval {
+  background: var(--amber);
+  border-radius: 4px 0 0 4px;
+  --gc: rgba(251, 191, 36, .75);
+  --gcf: rgba(251, 191, 36, .35);
+  animation: glowpulse 1.8s ease-in-out infinite;
+}
+
+.seg.question {
+  background: var(--blue);
+  border-radius: 4px 0 0 4px;
+  --gc: rgba(96, 165, 250, .75);
+  --gcf: rgba(96, 165, 250, .35);
+  animation: glowpulse 1.8s ease-in-out infinite;
+}
+
+.seg.done {
+  background: var(--white);
+  box-shadow: 0 0 10px rgba(244, 246, 251, .6);
+  opacity: .85;
+}
+
+.seglabel {
+  position: absolute;
+  right: 14px;
+  top: 50%;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 10px;
+  border-radius: 8px;
+  white-space: nowrap;
+  background: rgba(14, 17, 23, .94);
+  border: 1px solid rgba(255, 255, 255, .08);
+  color: #dfe4ec;
+  font-size: 11px;
+  pointer-events: auto;
+  opacity: 0;
+  transform: translateX(14px) translateY(-50%);
+  transition: opacity .34s var(--ease-out), transform .4s var(--spring);
+  box-shadow: 0 10px 30px -10px rgba(0, 0, 0, .6);
+}
+
+.seglabel .el {
+  color: #8b95a3;
+  font-variant-numeric: tabular-nums;
+}
+
+.seglabel svg {
+  opacity: .85;
+  flex: none;
+}
+
+.filament.peeking .seglabel {
+  opacity: 1;
+  transform: translateX(0) translateY(-50%);
+}
+
+.seglabel.attnchip {
+  opacity: 1;
+  transform: translateX(0) translateY(-50%);
+}
+
+@keyframes idlebreath {
+  0%, 90%, 100% { opacity: .45; }
+  95% { opacity: .85; }
+}
+
+@keyframes breathe {
+  0%, 100% { opacity: .5; }
+  50% { opacity: 1; }
+}
+
+@keyframes glowpulse {
+  0%, 100% { box-shadow: 0 0 6px 1px var(--gc), 0 0 14px 3px var(--gcf); }
+  50% { box-shadow: 0 0 12px 3px var(--gc), 0 0 30px 8px var(--gcf); }
+}

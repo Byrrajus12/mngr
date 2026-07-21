@@ -1,0 +1,834 @@
+<title>Cairn — mngr concept</title>
+<style>
+  :root{
+    --emerald:#34d399;
+    --amber:#fbbf24;
+    --blue:#60a5fa;
+    --white:#eef2f6;
+    --glass:rgba(10,12,16,0.82);
+    --font:"Segoe UI Variable","Segoe UI",Inter,system-ui,-apple-system,sans-serif;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  ::-webkit-scrollbar{width:0;height:0}
+  *{scrollbar-width:none}
+
+  #stage{
+    position:fixed;inset:0;overflow:hidden;
+    font-family:var(--font);
+    color:#e7ecf2;
+    user-select:none;
+    background:
+      radial-gradient(1200px 800px at 78% 12%, rgba(58,84,120,0.35), transparent 60%),
+      radial-gradient(1000px 900px at 12% 88%, rgba(80,52,96,0.35), transparent 62%),
+      radial-gradient(700px 600px at 55% 45%, rgba(30,60,70,0.28), transparent 60%),
+      linear-gradient(160deg,#0a0d12 0%,#0d1017 45%,#090a0f 100%);
+  }
+  /* grain */
+  #grain{
+    position:absolute;inset:0;pointer-events:none;opacity:0.05;mix-blend-mode:overlay;
+    background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='140' height='140'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
+  }
+
+  /* fake windows */
+  .win{
+    position:absolute;border-radius:12px;
+    background:linear-gradient(180deg,rgba(30,36,46,0.55),rgba(16,20,27,0.5));
+    border:1px solid rgba(255,255,255,0.06);
+    box-shadow:0 40px 120px -30px rgba(0,0,0,0.7);
+    backdrop-filter:blur(3px);overflow:hidden;
+  }
+  .win .bar{height:34px;display:flex;align-items:center;gap:7px;padding:0 12px;
+    background:rgba(255,255,255,0.03);border-bottom:1px solid rgba(255,255,255,0.05)}
+  .dot{width:11px;height:11px;border-radius:50%}
+  .bar .t{margin-left:10px;font-size:11px;color:rgba(255,255,255,0.4)}
+  .win .body{padding:16px 18px;filter:blur(0.4px);opacity:.7}
+  .ln{height:8px;border-radius:4px;margin-bottom:11px;background:rgba(255,255,255,0.06)}
+  .code .ln{background:linear-gradient(90deg,rgba(96,165,250,0.25),rgba(52,211,153,0.12))}
+
+  #vscode{left:6%;top:11%;width:46%;height:56%}
+  #term{right:8%;top:20%;width:32%;height:40%;transform:rotate(-0.6deg)}
+  #term .body{font-family:ui-monospace,"Cascadia Code",Consolas,monospace;font-size:11px;line-height:1.9;color:rgba(160,220,180,0.6)}
+
+  /* taskbar */
+  #taskbar{
+    position:absolute;left:0;right:0;bottom:0;height:48px;
+    background:rgba(12,14,19,0.72);backdrop-filter:blur(20px);
+    border-top:1px solid rgba(255,255,255,0.05);
+    display:flex;align-items:center;justify-content:center;gap:16px;z-index:5;
+  }
+  #taskbar .ti{width:22px;height:22px;border-radius:6px;background:rgba(255,255,255,0.08);
+    display:flex;align-items:center;justify-content:center}
+  #taskbar .ti svg{opacity:.6}
+  #clock{position:absolute;right:16px;font-size:11px;color:rgba(255,255,255,0.45);text-align:right;line-height:1.35}
+
+  /* caption */
+  #caption{position:absolute;left:18px;top:16px;font-size:11px;color:rgba(255,255,255,0.34);
+    letter-spacing:.2px;z-index:6;max-width:240px;line-height:1.5}
+
+  /* demo panel */
+  #demo{
+    position:absolute;left:18px;bottom:64px;z-index:40;width:190px;
+    background:rgba(14,17,23,0.86);backdrop-filter:blur(20px);
+    border:1px solid rgba(255,255,255,0.08);border-radius:14px;padding:12px;
+    box-shadow:0 30px 80px -30px rgba(0,0,0,0.8);
+  }
+  #demo h4{font-size:9.5px;letter-spacing:2px;color:rgba(255,255,255,0.4);
+    font-weight:700;margin-bottom:10px}
+  #demo .row{display:flex;gap:6px;margin-bottom:6px}
+  #demo button{
+    flex:1;font-family:var(--font);font-size:11px;color:#dfe6ee;cursor:pointer;
+    background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.08);
+    border-radius:8px;padding:7px 8px;transition:background .15s, transform .1s;
+  }
+  #demo button:hover{background:rgba(255,255,255,0.1)}
+  #demo button:active{transform:scale(0.95)}
+  #demo .count{font-size:11px;color:rgba(255,255,255,0.5);text-align:center;
+    align-self:center;min-width:16px}
+  #demo .full{width:100%}
+  #muteBtn.on{color:var(--emerald);border-color:rgba(52,211,153,0.4)}
+
+  /* Cairn object */
+  #cairn{position:absolute;z-index:30;width:120px;touch-action:none}
+  #stack{position:absolute;right:0;bottom:0;width:120px;cursor:grab}
+  #stack.dragging{cursor:grabbing}
+
+  .chip{
+    position:absolute;right:0;height:10px;width:44px;border-radius:6px;
+    background:linear-gradient(180deg,rgba(28,33,42,0.92),rgba(14,17,23,0.94));
+    border:1px solid rgba(255,255,255,0.07);
+    box-shadow:0 6px 16px -6px rgba(0,0,0,0.7), inset 0 1px 0 rgba(255,255,255,0.06);
+    will-change:transform,opacity;
+    display:flex;align-items:center;justify-content:flex-end;
+    transform-origin:right center;
+  }
+  .chip .core{
+    position:absolute;left:8px;right:8px;top:2px;bottom:2px;border-radius:4px;
+    opacity:0;transition:opacity .4s;
+  }
+  .chip .label{
+    position:absolute;right:52px;white-space:nowrap;font-size:11px;
+    color:#cfd8e2;opacity:0;pointer-events:none;
+    display:flex;align-items:center;gap:6px;
+    background:rgba(12,14,19,0.7);padding:3px 8px;border-radius:8px;
+    border:1px solid rgba(255,255,255,0.06);backdrop-filter:blur(8px);
+    transform:translateX(6px);transition:opacity .28s, transform .28s;
+  }
+  .chip .label .el{color:rgba(255,255,255,0.45);font-variant-numeric:tabular-nums}
+  .chip.base{opacity:0.3}
+
+  /* Expanded panel */
+  #panel{
+    position:absolute;z-index:35;width:380px;
+    background:var(--glass);backdrop-filter:blur(24px);
+    border:1px solid rgba(255,255,255,0.08);border-radius:16px;
+    box-shadow:0 50px 130px -30px rgba(0,0,0,0.85), inset 0 1px 0 rgba(255,255,255,0.05);
+    padding:16px;transform-origin:bottom right;
+    opacity:0;pointer-events:none;
+    will-change:transform,opacity;
+  }
+  #panel.open{pointer-events:auto}
+  .phead{display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:14px}
+  .phead .wm{font-size:12px;font-weight:700;letter-spacing:.5px;color:#f2f5f8}
+  .phead .agg{font-size:11px;color:rgba(255,255,255,0.5);margin-top:3px}
+  .usage{margin-top:8px;width:150px}
+  .usage .txt{font-size:10px;color:rgba(255,255,255,0.42);margin-bottom:4px;display:flex;justify-content:space-between}
+  .usage .track{height:4px;border-radius:2px;background:rgba(255,255,255,0.08);overflow:hidden}
+  .usage .fill{height:100%;width:62%;border-radius:2px;
+    background:linear-gradient(90deg,var(--blue),var(--emerald))}
+  .pclose{font-size:11px;color:rgba(255,255,255,0.4);cursor:pointer;padding:2px 6px;border-radius:6px}
+  .pclose:hover{background:rgba(255,255,255,0.06)}
+
+  .card{
+    background:rgba(255,255,255,0.035);border:1px solid rgba(255,255,255,0.06);
+    border-radius:12px;padding:12px;margin-bottom:9px;position:relative;overflow:hidden;
+    will-change:transform,opacity;
+  }
+  .card:last-child{margin-bottom:0}
+  .card .top{display:flex;align-items:center;gap:9px}
+  .glyph{width:22px;height:22px;flex:none;display:flex;align-items:center;justify-content:center;
+    border-radius:6px;background:rgba(255,255,255,0.05)}
+  .card .proj{font-size:12.5px;font-weight:600;color:#eef2f6}
+  .card .act{font-size:11px;color:rgba(255,255,255,0.52);margin-top:1px}
+  .card .meta{margin-left:auto;text-align:right;flex:none}
+  .sdot{width:7px;height:7px;border-radius:50%;display:inline-block;margin-bottom:3px;
+    box-shadow:0 0 8px currentColor}
+  .card .el{font-size:10.5px;color:rgba(255,255,255,0.45);font-variant-numeric:tabular-nums}
+  .jump{position:absolute;top:10px;right:10px;font-size:12px;color:rgba(255,255,255,0.3);
+    cursor:pointer;opacity:0;transition:opacity .2s}
+  .card:hover .jump{opacity:1}
+
+  .cmdchip{margin-top:10px;font-family:ui-monospace,"Cascadia Code",Consolas,monospace;
+    font-size:11px;color:#e6d38a;background:rgba(251,191,36,0.08);
+    border:1px solid rgba(251,191,36,0.2);border-radius:7px;padding:7px 9px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .btns{display:flex;gap:7px;margin-top:9px}
+  .btns button{font-family:var(--font);font-size:11px;cursor:pointer;border-radius:8px;
+    padding:6px 12px;transition:transform .1s, background .15s;flex:none}
+  .btns button:active{transform:scale(0.94)}
+  .allow{background:rgba(52,211,153,0.16);border:1px solid rgba(52,211,153,0.4);color:#8ff0c8}
+  .allow:hover{background:rgba(52,211,153,0.26)}
+  .deny{background:transparent;border:1px solid rgba(255,255,255,0.12);color:rgba(255,255,255,0.6)}
+  .deny:hover{background:rgba(255,255,255,0.05)}
+
+  .qtext{font-size:11.5px;color:#dbe2ea;margin-top:9px;line-height:1.4}
+  .pills{display:flex;gap:6px;margin-top:9px;flex-wrap:wrap}
+  .pill{font-size:11px;cursor:pointer;border-radius:14px;padding:5px 12px;
+    background:rgba(96,165,250,0.1);border:1px solid rgba(96,165,250,0.3);color:#bcd6ff;
+    transition:transform .1s, background .15s}
+  .pill:hover{background:rgba(96,165,250,0.2)}
+  .pill:active{transform:scale(0.94)}
+
+  .resolved{font-size:11px;color:var(--emerald);margin-top:9px;opacity:0;
+    display:flex;align-items:center;gap:6px}
+  .card.attention-req{border-color:rgba(251,191,36,0.28);background:rgba(251,191,36,0.05)}
+  .card.attention-q{border-color:rgba(96,165,250,0.28);background:rgba(96,165,250,0.05)}
+  .card.done{border-color:rgba(255,255,255,0.14)}
+  .card.done .top .proj{color:#f2f5f8}
+  .checkwrap{width:22px;height:22px}
+  .checkwrap path{stroke-dasharray:24;stroke-dashoffset:24}
+  .card.done.drawn .checkwrap path{transition:stroke-dashoffset .5s ease .05s;stroke-dashoffset:0}
+  .dismiss{font-size:10px;color:rgba(255,255,255,0.35);margin-top:7px}
+
+  .sparkle{position:absolute;pointer-events:none;font-size:10px;color:#fff;opacity:0}
+</style>
+
+<div id="stage">
+  <div id="grain"></div>
+
+  <div class="win" id="vscode">
+    <div class="bar">
+      <span class="dot" style="background:#ff5f57"></span>
+      <span class="dot" style="background:#febc2e"></span>
+      <span class="dot" style="background:#28c840"></span>
+      <span class="t">overlay.rs — mngr — Visual Studio Code</span>
+    </div>
+    <div class="body code">
+      <div class="ln" style="width:62%"></div><div class="ln" style="width:78%"></div>
+      <div class="ln" style="width:45%"></div><div class="ln" style="width:70%"></div>
+      <div class="ln" style="width:55%"></div><div class="ln" style="width:82%"></div>
+      <div class="ln" style="width:40%"></div><div class="ln" style="width:66%"></div>
+      <div class="ln" style="width:50%"></div>
+    </div>
+  </div>
+
+  <div class="win" id="term">
+    <div class="bar">
+      <span class="dot" style="background:#ff5f57"></span>
+      <span class="dot" style="background:#febc2e"></span>
+      <span class="dot" style="background:#28c840"></span>
+      <span class="t">claude — api-server</span>
+    </div>
+    <div class="body">
+      &gt; running tests…<br>
+      &nbsp;&nbsp;PASS auth.spec.ts<br>
+      &nbsp;&nbsp;PASS routes.spec.ts<br>
+      &gt; editing src/db.ts_
+    </div>
+  </div>
+
+  <div id="caption">Concept 2 / Cairn — a stack of stones, one per agent</div>
+
+  <div id="taskbar">
+    <div class="ti"><svg width="12" height="12" viewBox="0 0 12 12"><rect width="5" height="5" fill="#4c9df0"/><rect x="6" width="5" height="5" fill="#4c9df0"/><rect y="6" width="5" height="5" fill="#4c9df0"/><rect x="6" y="6" width="5" height="5" fill="#4c9df0"/></svg></div>
+    <div class="ti"><svg width="13" height="13" viewBox="0 0 13 13"><circle cx="6.5" cy="6.5" r="5" fill="none" stroke="#bbb" stroke-width="1.4"/></svg></div>
+    <div class="ti"><svg width="13" height="13" viewBox="0 0 13 13"><path d="M2 9 L5 4 L7 7 L9 3 L11 9" fill="none" stroke="#bbb" stroke-width="1.3"/></svg></div>
+    <div class="ti"><svg width="13" height="13" viewBox="0 0 13 13"><rect x="2" y="3" width="9" height="7" rx="1.5" fill="none" stroke="#bbb" stroke-width="1.2"/></svg></div>
+    <div id="clock"><div>4:12 PM</div><div>7/20/2026</div></div>
+  </div>
+
+  <!-- Demo controls -->
+  <div id="demo">
+    <h4>DEMO</h4>
+    <div class="row">
+      <button id="minus">− Agent</button>
+      <span class="count" id="agentCount">0</span>
+      <button id="plus">+ Agent</button>
+    </div>
+    <div class="row"><button class="full" id="perm">Trigger permission</button></div>
+    <div class="row"><button class="full" id="ask">Trigger question</button></div>
+    <div class="row"><button class="full" id="complete">Complete a task</button></div>
+    <div class="row"><button class="full" id="toggle">Expand / Collapse</button></div>
+    <div class="row"><button class="full" id="muteBtn">🔊 Sound on</button></div>
+  </div>
+
+  <!-- Cairn -->
+  <div id="cairn">
+    <div id="panel"></div>
+    <div id="stack"></div>
+  </div>
+</div>
+
+<script>
+(function(){
+  "use strict";
+  const stage=document.getElementById('stage');
+  const cairn=document.getElementById('cairn');
+  const stack=document.getElementById('stack');
+  const panel=document.getElementById('panel');
+  const countEl=document.getElementById('agentCount');
+
+  const CHIP_H=10, GAP=4, CHIP_W=44;
+  const PROJECTS=[
+    {proj:'mngr', agent:'claude', act:'Editing src/overlay.rs'},
+    {proj:'api-server', agent:'codex', act:'Running tests…'},
+    {proj:'dotfiles', agent:'claude', act:'Formatting config'},
+    {proj:'web-ui', agent:'claude', act:'Refactoring hooks'},
+    {proj:'infra', agent:'codex', act:'Applying terraform'},
+  ];
+
+  let expanded=false;
+  let muted=false;
+
+  /* ---------- Spring engine ---------- */
+  function Spring(val, stiffness, damping){
+    this.val=val; this.target=val; this.vel=0;
+    this.k=stiffness; this.d=damping;
+  }
+  Spring.prototype.step=function(dt){
+    const f=-this.k*(this.val-this.target);
+    const damp=-this.d*this.vel;
+    this.vel+=(f+damp)*dt;
+    this.val+=this.vel*dt;
+    return Math.abs(this.vel)>0.02 || Math.abs(this.val-this.target)>0.02;
+  };
+  Spring.prototype.set=function(t){this.target=t;};
+  Spring.prototype.jump=function(v){this.val=v;this.vel=0;};
+
+  /* ---------- Audio ---------- */
+  let actx=null;
+  function beep(freq, dur, type){
+    if(muted) return;
+    try{
+      if(!actx) actx=new (window.AudioContext||window.webkitAudioContext)();
+      const o=actx.createOscillator(), g=actx.createGain();
+      o.type=type||'square'; o.frequency.value=freq;
+      g.gain.value=0.05;
+      o.connect(g); g.connect(actx.destination);
+      const t=actx.currentTime;
+      g.gain.setValueAtTime(0.05,t);
+      g.gain.exponentialRampToValueAtTime(0.0001,t+dur);
+      o.start(t); o.stop(t+dur);
+    }catch(e){}
+  }
+  const snd={
+    drop:()=>{beep(330,0.09);setTimeout(()=>beep(494,0.08),40);},
+    leave:()=>beep(240,0.1),
+    attn:()=>{beep(660,0.1);setTimeout(()=>beep(880,0.12),90);},
+    allow:()=>{beep(523,0.08);setTimeout(()=>beep(784,0.1),70);},
+    deny:()=>beep(180,0.14,'sawtooth'),
+    done:()=>{beep(659,0.07);setTimeout(()=>beep(988,0.09),60);setTimeout(()=>beep(1318,0.1),130);},
+    expand:()=>beep(440,0.06),
+  };
+
+  /* ---------- Glyphs ---------- */
+  function glyphSVG(agent,size,color){
+    color=color||'#cfd8e2';
+    if(agent==='codex'){
+      return `<svg width="${size}" height="${size}" viewBox="0 0 16 16" fill="none" stroke="${color}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 4 L2.5 8 L6 12"/><path d="M10 4 L13.5 8 L10 12"/></svg>`;
+    }
+    return `<svg width="${size}" height="${size}" viewBox="0 0 16 16" fill="none" stroke="${color}" stroke-width="1.5" stroke-linecap="round"><path d="M8 2 V14 M2 8 H14 M3.8 3.8 L12.2 12.2 M12.2 3.8 L3.8 12.2"/></svg>`;
+  }
+
+  /* ---------- Model ---------- */
+  let agents=[]; // {id, proj, agent, act, status, startTs, jitter, chip, springs, phase}
+  let nextId=1;
+
+  const baseChip=makeChip(true);
+  stack.appendChild(baseChip.el);
+
+  function makeChip(isBase){
+    const el=document.createElement('div');
+    el.className='chip'+(isBase?' base':'');
+    const core=document.createElement('div'); core.className='core';
+    const label=document.createElement('div'); label.className='label';
+    el.appendChild(core); el.appendChild(label);
+    return {el, core, label};
+  }
+
+  function colorFor(status){
+    if(status==='attention-req') return 'var(--amber)';
+    if(status==='attention-q') return 'var(--blue)';
+    if(status==='done') return 'var(--white)';
+    return 'var(--emerald)';
+  }
+  function glowFor(status){
+    const map={
+      working:'52,211,153', 'attention-req':'251,191,36',
+      'attention-q':'96,165,250', done:'238,242,246'
+    };
+    return map[status]||'52,211,153';
+  }
+
+  function addAgent(){
+    if(agents.length>=5) return;
+    const p=PROJECTS[agents.length];
+    const chip=makeChip(false);
+    stack.appendChild(chip.el);
+    const a={
+      id:nextId++, proj:p.proj, agent:p.agent, act:p.act,
+      status:'working', startTs:Date.now(),
+      jitter:(Math.random()*2-1),
+      chip, phase:Math.random()*Math.PI*2,
+      y:new Spring(0,120,14), x:new Spring(0,140,16),
+      lift:new Spring(0,180,15), tilt:new Spring(0,160,14),
+      op:new Spring(0,90,18), scale:new Spring(0.6,150,15),
+      dropped:false, born:Date.now(),
+    };
+    // start above the stack for drop-in
+    agents.push(a);
+    layout();
+    // drop animation: start high, spring down
+    a.y.jump(a.y.target-60);
+    a.op.set(1); a.op.jump(0); a.op.set(1);
+    a.scale.set(1);
+    a.dropped=true;
+    // compress chips below
+    compress();
+    snd.drop();
+    kick();
+    updateCount();
+    if(expanded) rebuildPanel();
+  }
+
+  function removeAgent(){
+    if(!agents.length) return;
+    const a=agents[agents.length-1];
+    a.status='leaving';
+    a.op.set(0); a.scale.set(0.5); a.y.set(a.y.target-30);
+    snd.leave();
+    setTimeout(()=>{
+      const i=agents.indexOf(a);
+      if(i>=0){ if(a.chip.el.parentNode) a.chip.el.remove(); agents.splice(i,1);}
+      layout(); compress(); updateCount();
+      if(expanded) rebuildPanel();
+    }, 420);
+    kick();
+    updateCount();
+  }
+
+  function compress(){
+    // chips momentarily compress then recover
+    agents.forEach(a=>{ if(a.status!=='leaving'){ a.y.vel+=140; } });
+  }
+
+  function updateCount(){ countEl.textContent=agents.filter(a=>a.status!=='leaving').length; }
+
+  /* ---------- Layout (target positions in stack) ---------- */
+  let hovering=false;
+
+  function layout(){
+    const live=agents.filter(a=>a.status!=='leaving');
+    // base chip sits at bottom
+    baseChip.el.style.bottom='0px';
+    baseChip.el.style.transform=`translateX(${0}px)`;
+    baseChip.el.style.opacity = live.length? '0' : '0.3';
+
+    const fan = hovering && !expanded;
+    const gap = fan ? 22 : GAP;
+    const spread = fan ? 6 : 0;
+
+    live.forEach((a,idx)=>{
+      // idx 0 = bottom
+      const baseY = -(idx)*(CHIP_H+gap);
+      a.baseY = baseY;
+      let ty = baseY;
+      let tx = a.jitter + (a.status.startsWith('attention')? 0 : 0) - spread*(idx*0.15+0.4);
+      // attention lift
+      let liftTarget = 0;
+      if(a.status==='attention-req'||a.status==='attention-q'||a.status==='done-attn') liftTarget=6;
+      a.lift.set(liftTarget);
+      a.tilt.set((a.status==='attention-req'||a.status==='attention-q')?4:0);
+      a.y.set(ty);
+      a.x.set(fan? tx : a.jitter);
+    });
+  }
+
+  /* ---------- Render loop ---------- */
+  let last=performance.now();
+  let running=false;
+  function kick(){ if(!running){ running=true; last=performance.now(); requestAnimationFrame(loop);} }
+
+  function loop(now){
+    let dt=Math.min((now-last)/1000, 0.032); last=now;
+    let active=false;
+    const t=now/1000;
+
+    agents.forEach(a=>{
+      const moved = [a.y,a.x,a.lift,a.tilt,a.op,a.scale].map(s=>s.step(dt)).some(Boolean);
+      if(moved) active=true;
+      const el=a.chip.el;
+      const lift=a.lift.val;
+      // breathing (only when working, quiet)
+      let breathe=0, glowBase=0;
+      const glowColor=glowFor(a.status);
+      if(a.status==='working'){
+        breathe = (Math.sin(t*(Math.PI*2/4)+a.phase)*0.5+0.5); // 4s
+        glowBase = 0.35 + breathe*0.4;
+        active=true; // keep breathing alive
+      } else if(a.status==='attention-req'||a.status==='attention-q'){
+        const pulse=(Math.sin(t*4+a.phase)*0.5+0.5);
+        glowBase=0.6+pulse*0.5;
+        active=true;
+      } else if(a.status==='done'){
+        glowBase=0.55;
+      } else {
+        glowBase=0.3;
+      }
+      el.style.transform=`translate(${a.x.val}px, ${a.y.val - lift}px) rotate(${a.tilt.val}deg) scale(${a.scale.val})`;
+      el.style.opacity=a.op.val;
+      a.chip.core.style.opacity=1;
+      a.chip.core.style.background=`radial-gradient(120% 140% at 50% 50%, rgba(${glowColor},${glowBase}) 0%, rgba(${glowColor},${glowBase*0.35}) 45%, transparent 72%)`;
+      el.style.boxShadow=`0 6px 16px -6px rgba(0,0,0,0.7), inset 0 1px 0 rgba(255,255,255,0.06), 0 0 ${8+glowBase*16}px rgba(${glowColor},${glowBase*0.55})`;
+      // label in fan/hover
+      const showLabel = hovering && !expanded && a.status!=='leaving';
+      if(showLabel){
+        a.chip.label.style.opacity='1';
+        a.chip.label.style.transform='translateX(0)';
+      } else {
+        a.chip.label.style.opacity='0';
+        a.chip.label.style.transform='translateX(6px)';
+      }
+    });
+
+    // panel spring
+    if(panelSpring.step(dt)) active=true;
+    const ps=panelSpring.val;
+    if(ps>0.001 || expanded){
+      panel.style.opacity=Math.min(1,ps);
+      const sc=0.7+0.3*ps;
+      panel.style.transform=`scale(${sc})`;
+      // position panel above stack anchor
+    }
+
+    if(active){ requestAnimationFrame(loop); } else { running=false; }
+  }
+
+  const panelSpring=new Spring(0,150,17);
+
+  /* ---------- Hover fan-out ---------- */
+  stack.addEventListener('mouseenter',()=>{ if(expanded||dragging) return; hovering=true; layout(); kick(); });
+  stack.addEventListener('mouseleave',()=>{ hovering=false; layout(); kick(); });
+
+  // populate labels
+  function refreshLabels(){
+    agents.forEach(a=>{
+      const el=Date.now()-a.startTs;
+      a.chip.label.innerHTML=`${glyphSVG(a.agent,12)}<span>${a.proj}</span><span class="el">${fmt(el)}</span>`;
+    });
+  }
+
+  function fmt(ms){
+    const s=Math.floor(ms/1000);
+    const m=Math.floor(s/60);
+    return m>0? `${m}m ${String(s%60).padStart(2,'0')}s` : `${s}s`;
+  }
+
+  /* ---------- Attention triggers ---------- */
+  function triggerPermission(){
+    const a=firstWorking(); if(!a) return;
+    a.status='attention-req';
+    a.reqCmd='rm -rf node_modules && npm ci';
+    layout(); snd.attn(); flashLabel(a,'mngr · wants to run a command'); kick();
+    if(expanded) rebuildPanel();
+  }
+  function triggerQuestion(){
+    const a=firstWorking(); if(!a) return;
+    a.status='attention-q';
+    a.question='Should I use SQLite or Postgres for session storage?';
+    a.options=['SQLite','Postgres','Ask me later'];
+    layout(); snd.attn(); flashLabel(a,'mngr · has a question'); kick();
+    if(expanded) rebuildPanel();
+  }
+  function completeTask(){
+    const a=firstWorking(); if(!a) return;
+    a.status='done';
+    a.finishedIn=fmt(Date.now()-a.startTs);
+    layout(); snd.done(); sparkle(a); kick();
+    if(expanded) rebuildPanel();
+  }
+  function firstWorking(){ return agents.find(a=>a.status==='working'); }
+
+  let labelTimers=new WeakMap();
+  function flashLabel(a,text){
+    a.chip.label.innerHTML=`${glyphSVG(a.agent,12)}<span>${text}</span>`;
+    a.chip.label.style.opacity='1';
+    a.chip.label.style.transform='translateX(0)';
+    clearTimeout(labelTimers.get(a));
+    const tm=setTimeout(()=>{ if(!hovering){ a.chip.label.style.opacity='0'; a.chip.label.style.transform='translateX(6px)'; } }, 3000);
+    labelTimers.set(a,tm);
+  }
+
+  function sparkle(a){
+    const s=document.createElement('div'); s.className='sparkle'; s.textContent='✦';
+    const r=a.chip.el.getBoundingClientRect();
+    s.style.left=(r.left+r.width/2)+'px'; s.style.top=(r.top-6)+'px';
+    stage.appendChild(s);
+    s.animate([{opacity:0,transform:'translateY(0) scale(0.4)'},{opacity:1,transform:'translateY(-8px) scale(1.2)'},{opacity:0,transform:'translateY(-18px) scale(0.6)'}],{duration:700,easing:'ease-out'}).onfinish=()=>s.remove();
+  }
+
+  /* ---------- Expand / Panel ---------- */
+  function positionPanel(){
+    // anchor panel bottom-right to align with stack bottom-right
+    const stackW=120;
+    panel.style.right='0px';
+    panel.style.bottom = (agents.length*(CHIP_H+GAP)+18)+'px';
+  }
+
+  function rebuildPanel(){
+    positionPanel();
+    const live=agents.filter(a=>a.status!=='leaving');
+    const working=live.filter(a=>a.status==='working').length;
+    const needs=live.filter(a=>a.status==='attention-req'||a.status==='attention-q').length;
+    const done=live.filter(a=>a.status==='done').length;
+    let aggParts=[];
+    aggParts.push(`${working} working`);
+    if(needs) aggParts.push(`${needs} needs you`);
+    if(done) aggParts.push(`${done} done`);
+
+    let html=`<div class="phead"><div>
+      <div class="wm">mngr</div>
+      <div class="agg">${aggParts.join(' · ')}</div>
+      <div class="usage"><div class="txt"><span>Opus 62%</span><span>resets 4:00 PM</span></div>
+      <div class="track"><div class="fill"></div></div></div>
+    </div><div class="pclose" id="pclose">esc</div></div>`;
+
+    if(!live.length){
+      html+=`<div style="font-size:11.5px;color:rgba(255,255,255,0.4);padding:8px 2px">No active agents. Add one from the demo panel.</div>`;
+    }
+
+    live.forEach((a,i)=>{
+      html+=cardHTML(a,i);
+    });
+    panel.innerHTML=html;
+
+    // wire buttons
+    document.getElementById('pclose').onclick=collapse;
+    live.forEach(a=>{
+      const c=panel.querySelector(`[data-card="${a.id}"]`);
+      if(!c) return;
+      const jump=c.querySelector('.jump'); if(jump) jump.onclick=(e)=>{e.stopPropagation();};
+      if(a.status==='attention-req'){
+        c.querySelector('.allow').onclick=(e)=>{e.stopPropagation();resolvePerm(a,true);};
+        c.querySelector('.deny').onclick=(e)=>{e.stopPropagation();resolvePerm(a,false);};
+      }
+      if(a.status==='attention-q'){
+        c.querySelectorAll('.pill').forEach(p=>p.onclick=(e)=>{e.stopPropagation();resolveQ(a,p.textContent);});
+      }
+      if(a.status==='done'){
+        requestAnimationFrame(()=>c.classList.add('drawn'));
+        c.onclick=()=>dismissDone(a);
+      }
+    });
+    // stagger card entrance if opening
+    if(openingCards){
+      const cards=panel.querySelectorAll('.card');
+      cards.forEach((c,i)=>{
+        c.style.opacity='0'; c.style.transform='translateY(14px) scale(0.9)';
+        setTimeout(()=>{
+          c.style.transition='opacity .4s cubic-bezier(.2,.9,.25,1.2), transform .5s cubic-bezier(.2,.9,.25,1.2)';
+          c.style.opacity='1'; c.style.transform='translateY(0) scale(1)';
+        }, i*40+40);
+      });
+      openingCards=false;
+    }
+  }
+
+  function cardHTML(a,i){
+    const color=glowFor(a.status);
+    const dotColor = a.status==='working'?'var(--emerald)':a.status==='attention-req'?'var(--amber)':a.status==='attention-q'?'var(--blue)':'#fff';
+    let cls='card'+(a.status==='attention-req'?' attention-req':a.status==='attention-q'?' attention-q':a.status==='done'?' done':'');
+    let inner=`<div class="top">
+      <div class="glyph">${glyphSVG(a.agent,14, a.status==='working'?'#8ff0c8':'#cfd8e2')}</div>
+      <div>
+        <div class="proj">${a.proj}</div>
+        <div class="act">${a.status==='done'?('Finished · '+a.finishedIn):a.status==='attention-req'?'Waiting for permission':a.status==='attention-q'?'Waiting for your answer':a.act}</div>
+      </div>
+      <div class="meta"><span class="sdot" style="color:${dotColor}"></span><br><span class="el" data-el="${a.id}">${fmt(Date.now()-a.startTs)}</span></div>
+    </div>`;
+    if(a.status!=='done') inner+=`<div class="jump">↗</div>`;
+
+    if(a.status==='attention-req'){
+      inner+=`<div class="cmdchip">${a.reqCmd}</div>
+      <div class="btns"><button class="allow">Allow</button><button class="deny">Deny</button></div>
+      <div class="resolved" data-res="${a.id}"></div>`;
+    } else if(a.status==='attention-q'){
+      inner+=`<div class="qtext">${a.question}</div>
+      <div class="pills">${a.options.map(o=>`<span class="pill">${o}</span>`).join('')}</div>
+      <div class="resolved" data-res="${a.id}"></div>`;
+    } else if(a.status==='done'){
+      inner=`<div class="top">
+        <div class="glyph"><svg class="checkwrap" viewBox="0 0 22 22" fill="none" stroke="var(--emerald)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 11.5 L9.5 16 L17 6.5"/></svg></div>
+        <div><div class="proj">${a.proj}</div><div class="act">Finished · ${a.finishedIn}</div></div>
+        <div class="meta"><span class="sdot" style="color:#fff"></span></div>
+      </div><div class="dismiss">click to dismiss</div>`;
+    }
+    return `<div class="${cls}" data-card="${a.id}">${inner}</div>`;
+  }
+
+  function resolvePerm(a,allowed){
+    if(allowed) snd.allow(); else snd.deny();
+    const res=panel.querySelector(`[data-res="${a.id}"]`);
+    const card=panel.querySelector(`[data-card="${a.id}"]`);
+    if(res){
+      res.innerHTML = allowed? '✓ Allowed · resuming' : '✕ Denied · resuming';
+      res.style.color = allowed? 'var(--emerald)':'rgba(255,255,255,0.5)';
+      res.style.transition='opacity .3s'; res.style.opacity='1';
+    }
+    if(card){ card.querySelector('.btns').style.opacity='0.4'; card.querySelector('.btns').style.pointerEvents='none';
+      card.querySelector('.cmdchip').style.opacity='0.4'; }
+    card.animate([{transform:'scale(1)'},{transform:'scale(1.02)'},{transform:'scale(1)'}],{duration:280,easing:'ease-out'});
+    setTimeout(()=>{ a.status='working'; a.startTs=Date.now(); layout(); if(expanded) rebuildPanel(); kick(); }, 900);
+  }
+
+  function resolveQ(a,choice){
+    snd.allow();
+    const res=panel.querySelector(`[data-res="${a.id}"]`);
+    const card=panel.querySelector(`[data-card="${a.id}"]`);
+    if(res){ res.innerHTML=`→ ${choice}`; res.style.color='var(--blue)'; res.style.transition='opacity .3s'; res.style.opacity='1'; }
+    if(card){ card.querySelectorAll('.pill').forEach(p=>{p.style.opacity=p.textContent===choice?'1':'0.35';p.style.pointerEvents='none';}); }
+    setTimeout(()=>{ a.status='working'; a.act='Applying: '+choice; a.startTs=Date.now(); layout(); if(expanded) rebuildPanel(); kick(); }, 900);
+  }
+
+  function dismissDone(a){
+    a.status='leaving';
+    a.op.set(0); a.scale.set(0.5);
+    const card=panel.querySelector(`[data-card="${a.id}"]`);
+    if(card){ card.style.transition='opacity .3s, transform .3s'; card.style.opacity='0'; card.style.transform='translateX(20px)'; }
+    snd.leave();
+    setTimeout(()=>{
+      const i=agents.indexOf(a); if(i>=0){ if(a.chip.el.parentNode)a.chip.el.remove(); agents.splice(i,1);}
+      layout(); updateCount(); if(expanded) rebuildPanel(); kick();
+    },320);
+  }
+
+  let openingCards=false;
+  function expand(){
+    if(expanded) return;
+    expanded=true; hovering=false;
+    openingCards=true;
+    layout();
+    rebuildPanel();
+    panel.classList.add('open');
+    panelSpring.set(1);
+    // hide chips (they "fly" into cards) — fade the stack
+    agents.forEach(a=>{ a.op.set(0.0); a.scale.set(0.4); });
+    stack.style.transition='opacity .3s'; stack.style.opacity='0';
+    snd.expand();
+    kick();
+  }
+  function collapse(){
+    if(!expanded) return;
+    expanded=false;
+    panelSpring.set(0);
+    panel.classList.remove('open');
+    stack.style.opacity='1';
+    agents.forEach(a=>{ a.op.set(1); a.scale.set(1); a.y.vel-=40; });
+    layout(); compress();
+    snd.expand();
+    kick();
+  }
+  function toggle(){ expanded? collapse() : expand(); }
+
+  /* ---------- Drag ---------- */
+  let dragging=false, dragMoved=false, startX,startY, originRight, originBottom;
+  // cairn positioned via right/bottom
+  let anchor={right:26, bottom:72};
+  applyAnchor();
+  function applyAnchor(){
+    cairn.style.right=anchor.right+'px';
+    cairn.style.bottom=anchor.bottom+'px';
+  }
+
+  stack.addEventListener('pointerdown',(e)=>{
+    if(expanded) return;
+    dragging=true; dragMoved=false;
+    startX=e.clientX; startY=e.clientY;
+    originRight=anchor.right; originBottom=anchor.bottom;
+    stack.classList.add('dragging');
+    stack.setPointerCapture(e.pointerId);
+    hovering=false; layout();
+  });
+  stack.addEventListener('pointermove',(e)=>{
+    if(!dragging) return;
+    const dx=e.clientX-startX, dy=e.clientY-startY;
+    if(Math.abs(dx)+Math.abs(dy)>4) dragMoved=true;
+    anchor.right=originRight-dx;
+    anchor.bottom=originBottom+dy;
+    applyAnchor();
+  });
+  stack.addEventListener('pointerup',(e)=>{
+    if(!dragging) return;
+    dragging=false;
+    stack.classList.remove('dragging');
+    if(dragMoved){
+      snapToCorner();
+    } else {
+      // click => expand
+      expand();
+    }
+  });
+
+  function snapToCorner(){
+    const W=window.innerWidth, H=window.innerHeight;
+    // current stack center in screen coords
+    const r=stack.getBoundingClientRect();
+    const cx=r.left+r.width/2, cy=r.top+r.height/2;
+    const right = cx > W/2;
+    const targetRight = right ? 26 : W-26-120;
+    const targetBottom = 72; // above taskbar
+    // spring the anchor
+    springAnchor(targetRight, targetBottom);
+  }
+  const aR=new Spring(anchor.right,140,15), aB=new Spring(anchor.bottom,140,15);
+  let anchorAnim=false;
+  function springAnchor(tr,tb){
+    aR.jump(anchor.right); aB.jump(anchor.bottom);
+    aR.set(tr); aB.set(tb);
+    if(!anchorAnim){ anchorAnim=true; requestAnimationFrame(stepAnchor); }
+  }
+  function stepAnchor(){
+    let a1=aR.step(0.016), a2=aB.step(0.016);
+    anchor.right=aR.val; anchor.bottom=aB.val; applyAnchor();
+    if(a1||a2){ requestAnimationFrame(stepAnchor); } else { anchorAnim=false; }
+  }
+
+  /* ---------- Global collapse ---------- */
+  stage.addEventListener('pointerdown',(e)=>{
+    if(expanded && !panel.contains(e.target) && !stack.contains(e.target) && !document.getElementById('demo').contains(e.target)){
+      collapse();
+    }
+  });
+  document.addEventListener('keydown',(e)=>{ if(e.key==='Escape') collapse(); });
+
+  /* ---------- Live tick ---------- */
+  setInterval(()=>{
+    refreshLabels();
+    if(expanded){
+      agents.forEach(a=>{
+        const el=panel.querySelector(`[data-el="${a.id}"]`);
+        if(el) el.textContent=fmt(Date.now()-a.startTs);
+      });
+    }
+  },1000);
+
+  /* ---------- Wire demo ---------- */
+  document.getElementById('plus').onclick=addAgent;
+  document.getElementById('minus').onclick=removeAgent;
+  document.getElementById('perm').onclick=triggerPermission;
+  document.getElementById('ask').onclick=triggerQuestion;
+  document.getElementById('complete').onclick=completeTask;
+  document.getElementById('toggle').onclick=toggle;
+  const mb=document.getElementById('muteBtn');
+  mb.onclick=()=>{ muted=!muted; mb.textContent=muted?'🔇 Muted':'🔊 Sound on'; mb.classList.toggle('on',!muted);
+    if(!muted && !actx){ try{actx=new(window.AudioContext||window.webkitAudioContext)();}catch(e){} } };
+  mb.classList.add('on');
+
+  window.addEventListener('resize',()=>{ if(!dragging){ /* keep anchor */ } });
+
+  // start with 2 agents for a nice initial impression
+  setTimeout(()=>{ addAgent(); }, 400);
+  setTimeout(()=>{ addAgent(); }, 900);
+
+  refreshLabels();
+  kick();
+})();
+</script>
