@@ -23,9 +23,9 @@ function statusKind(session: Session) {
 
 function segmentWidth(session: Session) {
   const kind = statusKind(session);
-  if (kind === "approval" || kind === "question") return 4;
-  if (kind === "done") return 3;
-  return 2;
+  if (kind === "approval" || kind === "question") return 4.5;
+  if (kind === "done") return 3.5;
+  return 3.5;
 }
 
 function elapsed(startedAt: number, now: number, lastEventAt?: number) {

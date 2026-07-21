@@ -233,6 +233,14 @@ function App() {
     setDemoSessions((current) => current.slice(0, -1));
   }
 
+  function toggleExpand() {
+    if (modeRef.current === "expanded") {
+      collapse();
+    } else {
+      expand();
+    }
+  }
+
   function updateRandomWorkingDemoSession(update: (session: Session) => Session) {
     setDemoSessions((current) => {
       const working = current
@@ -305,6 +313,7 @@ function App() {
           onTriggerPermission={triggerDemoPermission}
           onTriggerQuestion={triggerDemoQuestion}
           onCompleteTask={completeDemoTask}
+          onToggleExpand={toggleExpand}
         />
       ) : null}
     </div>

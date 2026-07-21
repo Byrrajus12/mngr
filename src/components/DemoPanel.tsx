@@ -7,6 +7,7 @@ type DemoPanelProps = {
   onTriggerPermission: () => void;
   onTriggerQuestion: () => void;
   onCompleteTask: () => void;
+  onToggleExpand: () => void;
 };
 
 function DemoPanel({
@@ -16,6 +17,7 @@ function DemoPanel({
   onTriggerPermission,
   onTriggerQuestion,
   onCompleteTask,
+  onToggleExpand,
 }: DemoPanelProps) {
   const [visible, setVisible] = useState(true);
 
@@ -42,6 +44,7 @@ function DemoPanel({
         <button className="dbtn wide" type="button" onClick={onTriggerPermission}>Trigger Permission</button>
         <button className="dbtn wide" type="button" onClick={onTriggerQuestion}>Trigger Question</button>
         <button className="dbtn wide" type="button" onClick={onCompleteTask}>Complete Task</button>
+        <button className="dbtn wide" type="button" onClick={onToggleExpand}>Expand / Collapse</button>
         <button className="dbtn mute" type="button" onClick={() => setVisible(false)}>
           <span className="sq" />
           Hide demo
