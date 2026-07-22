@@ -20,6 +20,10 @@ function needsAttention(status: SessionStatus) {
   return status === "WaitingForApproval" || status === "WaitingForInput";
 }
 
+function isActiveStatus(status: SessionStatus) {
+  return status === "Working" || status === "WaitingForApproval" || status === "WaitingForInput";
+}
+
 function App() {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [demoSessions, setDemoSessions] = useState<Session[]>([]);
@@ -148,13 +152,55 @@ function App() {
     };
   }, []);
 
+  const allSessions = useMemo(() => [...sessions, ...demoSessions], [demoSessions, sessions]);
+
+  useEffect(() => {
+    const sessionById = new Map(allSessions.map((session) => [session.session_id, session]));
+    const liveIds = new Set(sessionById.keys());
+
+    setDismissed((current) => {
+      let next: Set<string> | null = null;
+      for (const id of current) {
+        const session = sessionById.get(id);
+        if (!session || isActiveStatus(session.status)) {
+          next ??= new Set(current);
+          next.delete(id);
+        }
+      }
+      return next ?? current;
+    });
+
+    setFlash((current) => {
+      let next: Set<string> | null = null;
+      for (const id of current) {
+        if (!liveIds.has(id)) {
+          next ??= new Set(current);
+          next.delete(id);
+        }
+      }
+      return next ?? current;
+    });
+
+    for (const id of Array.from(flashTimers.current.keys())) {
+      if (!liveIds.has(id)) {
+        const timer = flashTimers.current.get(id);
+        if (timer) window.clearTimeout(timer);
+        flashTimers.current.delete(id);
+      }
+    }
+
+    for (const id of Array.from(prevStatusRef.current.keys())) {
+      if (!liveIds.has(id)) {
+        prevStatusRef.current.delete(id);
+      }
+    }
+  }, [allSessions]);
+
   // Attention flash: when a session newly needs attention while collapsed,
   // peek and surface its label for 3s.
   useEffect(() => {
     const prev = prevStatusRef.current;
     const newlyAttention: string[] = [];
-    const allSessions = [...sessions, ...demoSessions];
-
     for (const session of allSessions) {
       const wasAttn = needsAttention(prev.get(session.session_id) ?? "Idle");
       if (needsAttention(session.status) && !wasAttn) {
@@ -189,16 +235,16 @@ function App() {
       flashTimers.current.set(id, timer);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [demoSessions, sessions]);
+  }, [allSessions]);
 
   const activeSessions = useMemo(
     () =>
-      [...sessions, ...demoSessions].filter(
+      allSessions.filter(
         (session) =>
-          !dismissed.has(session.session_id) &&
+          (!dismissed.has(session.session_id) || isActiveStatus(session.status)) &&
           (session.status !== "Done" || now - session.last_event_at < 30 * 60 * 1000),
       ),
-    [demoSessions, dismissed, now, sessions],
+    [allSessions, dismissed, now],
   );
 
   function dismissSession(id: string) {
