@@ -260,6 +260,7 @@ function App() {
       last_event_at: Date.now(),
       current_tool: "Bash",
       pending_approval: {
+        request_id: `demo-${session.session_id}-approval`,
         tool_name: "Bash",
         tool_input: { command: "rm -rf node_modules && npm ci" },
       },

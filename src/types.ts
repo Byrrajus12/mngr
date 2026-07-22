@@ -7,6 +7,7 @@ export type SessionStatus =
   | "Error";
 
 export type ApprovalRequest = {
+  request_id: string;
   tool_name: string;
   tool_input: unknown;
 };

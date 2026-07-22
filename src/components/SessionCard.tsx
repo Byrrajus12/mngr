@@ -1,3 +1,4 @@
+import { invoke } from "@tauri-apps/api/core";
 import { useState } from "react";
 import type { Session } from "../types";
 
@@ -77,10 +78,57 @@ function commandText(session: Session) {
 function SessionCard({ session, index, now, onDismiss }: SessionCardProps) {
   const cls = statusClass(session);
   const isDone = cls === "done";
+  const isDemo = session.session_id.startsWith("demo-");
   const [resolved, setResolved] = useState<string | null>(null);
+  const [reason, setReason] = useState("");
+  const [pendingAction, setPendingAction] = useState<string | null>(null);
+  const [approvalError, setApprovalError] = useState<string | null>(null);
 
   const showApproval = session.status === "WaitingForApproval" && !resolved;
   const showQuestion = session.status === "WaitingForInput" && !resolved;
+
+  async function resolveRealApproval(decision: "allow" | "deny", always: boolean) {
+    const requestId = session.pending_approval?.request_id;
+    if (!requestId) {
+      setApprovalError("Missing approval request id");
+      return;
+    }
+
+    setPendingAction(always ? "always" : decision);
+    setApprovalError(null);
+    try {
+      await invoke("resolve_approval", {
+        requestId,
+        decision,
+        reason: decision === "deny" ? reason.trim() || null : null,
+        always,
+      });
+    } catch (error) {
+      setApprovalError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setPendingAction(null);
+    }
+  }
+
+  function handleAllow(always: boolean) {
+    if (isDemo) {
+      console.log("mngr allow clicked", session.session_id);
+      setResolved("Allowed - resuming");
+      return;
+    }
+
+    resolveRealApproval("allow", always);
+  }
+
+  function handleDeny() {
+    if (isDemo) {
+      console.log("mngr deny clicked", session.session_id);
+      setResolved("Denied - resuming");
+      return;
+    }
+
+    resolveRealApproval("deny", false);
+  }
 
   return (
     <article
@@ -126,28 +174,45 @@ function SessionCard({ session, index, now, onDismiss }: SessionCardProps) {
       {showApproval ? (
         <>
           <div className="cmdchip">{commandText(session)}</div>
+          {!isDemo ? (
+            <input
+              className="reasonInput"
+              type="text"
+              value={reason}
+              onChange={(event) => setReason(event.target.value)}
+              placeholder="Optional deny reason"
+              aria-label="Optional deny reason"
+            />
+          ) : null}
           <div className="btns">
             <button
               className="allow"
               type="button"
-              onClick={() => {
-                console.log("mngr allow clicked", session.session_id);
-                setResolved("Allowed - resuming");
-              }}
+              disabled={pendingAction !== null}
+              onClick={() => handleAllow(false)}
             >
-              Allow
+              {pendingAction === "allow" ? "Allowing" : "Allow"}
             </button>
+            {!isDemo ? (
+              <button
+                className="alwaysAllow"
+                type="button"
+                disabled={pendingAction !== null}
+                onClick={() => handleAllow(true)}
+              >
+                {pendingAction === "always" ? "Saving" : "Always allow"}
+              </button>
+            ) : null}
             <button
               className="deny"
               type="button"
-              onClick={() => {
-                console.log("mngr deny clicked", session.session_id);
-                setResolved("Denied - resuming");
-              }}
+              disabled={pendingAction !== null}
+              onClick={handleDeny}
             >
-              Deny
+              {pendingAction === "deny" ? "Denying" : "Deny"}
             </button>
           </div>
+          {approvalError ? <div className="cardError">{approvalError}</div> : null}
         </>
       ) : null}
 

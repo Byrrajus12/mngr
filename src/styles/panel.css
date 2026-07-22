@@ -261,9 +261,32 @@
   transition: transform .1s, background .15s;
 }
 
+.btns button:disabled {
+  cursor: default;
+  opacity: .6;
+}
+
 .btns button:active,
 .pill:active {
   transform: scale(0.94);
+}
+
+.reasonInput {
+  box-sizing: border-box;
+  width: 100%;
+  margin-top: 8px;
+  padding: 6px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 7px;
+  outline: none;
+  background: rgba(255, 255, 255, 0.04);
+  color: rgba(255, 255, 255, 0.78);
+  font-family: var(--font);
+  font-size: 11px;
+}
+
+.reasonInput:focus {
+  border-color: rgba(251, 191, 36, 0.35);
 }
 
 .allow {
@@ -278,6 +301,18 @@
   background: rgba(52, 211, 153, 0.26);
 }
 
+.alwaysAllow {
+  padding: 6px 10px;
+  border: 1px solid rgba(127, 208, 192, 0.32);
+  border-radius: 8px;
+  background: rgba(127, 208, 192, 0.1);
+  color: #a8e4da;
+}
+
+.alwaysAllow:hover {
+  background: rgba(127, 208, 192, 0.18);
+}
+
 .deny {
   padding: 6px 12px;
   border: 1px solid rgba(255, 255, 255, 0.12);
@@ -288,6 +323,12 @@
 
 .deny:hover {
   background: rgba(255, 255, 255, 0.05);
+}
+
+.cardError {
+  margin-top: 8px;
+  color: #fca5a5;
+  font-size: 11px;
 }
 
 .qtext {
