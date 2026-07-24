@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { useState } from "react";
-import type { Session } from "../types";
+import type { PermissionSuggestion, Session } from "../types";
 
 type SessionCardProps = {
   session: Session;
@@ -75,6 +75,27 @@ function commandText(session: Session) {
   return `${name} ${String(input)}`;
 }
 
+function suggestionLabel(suggestion: PermissionSuggestion) {
+  const type = typeof suggestion.type === "string" ? suggestion.type : "permission";
+  const destination = typeof suggestion.destination === "string" ? suggestion.destination : "session";
+
+  if (type === "addDirectories" && Array.isArray(suggestion.directories)) {
+    const dirs = suggestion.directories.filter((dir): dir is string => typeof dir === "string");
+    if (dirs.length === 1) return `Allow access to ${dirs[0]} for this ${destination}`;
+    if (dirs.length > 1) return `Allow access to ${dirs.length} directories for this ${destination}`;
+  }
+
+  if (type === "setMode" && typeof suggestion.mode === "string") {
+    return `Use ${suggestion.mode} mode for this ${destination}`;
+  }
+
+  const fields = Object.entries(suggestion)
+    .filter(([key]) => key !== "type")
+    .map(([key, value]) => `${key}: ${Array.isArray(value) ? value.join(", ") : String(value)}`)
+    .join(", ");
+  return fields ? `Apply ${type} (${fields})` : `Apply ${type}`;
+}
+
 function SessionCard({ session, index, now, onDismiss }: SessionCardProps) {
   const cls = statusClass(session);
   const isDone = cls === "done";
@@ -87,21 +108,21 @@ function SessionCard({ session, index, now, onDismiss }: SessionCardProps) {
   const showApproval = session.status === "WaitingForApproval" && !resolved;
   const showQuestion = session.status === "WaitingForInput" && !resolved;
 
-  async function resolveRealApproval(decision: "allow" | "deny", always: boolean) {
+  async function resolveRealApproval(decision: "allow" | "deny", updatedPermissions?: PermissionSuggestion[]) {
     const requestId = session.pending_approval?.request_id;
     if (!requestId) {
       setApprovalError("Missing approval request id");
       return;
     }
 
-    setPendingAction(always ? "always" : decision);
+    setPendingAction(updatedPermissions ? "suggestion" : decision);
     setApprovalError(null);
     try {
       await invoke("resolve_approval", {
         requestId,
         decision,
         reason: decision === "deny" ? reason.trim() || null : null,
-        always,
+        updatedPermissions: updatedPermissions ?? null,
       });
     } catch (error) {
       setApprovalError(error instanceof Error ? error.message : String(error));
@@ -110,14 +131,14 @@ function SessionCard({ session, index, now, onDismiss }: SessionCardProps) {
     }
   }
 
-  function handleAllow(always: boolean) {
+  function handleAllow(updatedPermissions?: PermissionSuggestion[]) {
     if (isDemo) {
-      console.log("mngr allow clicked", session.session_id);
+      console.log("mngr allow clicked", session.session_id, updatedPermissions);
       setResolved("Allowed - resuming");
       return;
     }
 
-    resolveRealApproval("allow", always);
+    resolveRealApproval("allow", updatedPermissions);
   }
 
   function handleDeny() {
@@ -127,7 +148,7 @@ function SessionCard({ session, index, now, onDismiss }: SessionCardProps) {
       return;
     }
 
-    resolveRealApproval("deny", false);
+    resolveRealApproval("deny");
   }
 
   return (
@@ -189,20 +210,21 @@ function SessionCard({ session, index, now, onDismiss }: SessionCardProps) {
               className="allow"
               type="button"
               disabled={pendingAction !== null}
-              onClick={() => handleAllow(false)}
+              onClick={() => handleAllow()}
             >
               {pendingAction === "allow" ? "Allowing" : "Allow"}
             </button>
-            {!isDemo ? (
+            {(session.pending_approval?.permission_suggestions ?? []).map((suggestion, suggestionIndex) => (
               <button
-                className="alwaysAllow"
+                className="suggestionAllow"
                 type="button"
                 disabled={pendingAction !== null}
-                onClick={() => handleAllow(true)}
+                key={suggestionIndex}
+                onClick={() => handleAllow([suggestion])}
               >
-                {pendingAction === "always" ? "Saving" : "Always allow"}
+                {pendingAction === "suggestion" ? "Applying" : suggestionLabel(suggestion)}
               </button>
-            ) : null}
+            ))}
             <button
               className="deny"
               type="button"

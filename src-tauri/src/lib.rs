@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -18,6 +19,7 @@ const CLAUDE_EVENTS: &[&str] = &[
     "UserPromptSubmit",
     "Stop",
     "Notification",
+    "PermissionRequest",
 ];
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -28,13 +30,17 @@ pub struct ClaudeHookPayload {
     #[serde(default)]
     pub request_id: Option<String>,
     #[serde(default)]
-    pub gated: bool,
+    pub permission_mode: Option<String>,
     #[serde(default)]
     pub tool_name: Option<String>,
     #[serde(default)]
     pub tool_input: Option<Value>,
     #[serde(default)]
     pub tool_response: Option<Value>,
+    #[serde(default)]
+    pub transcript_path: Option<String>,
+    #[serde(default)]
+    pub permission_suggestions: Vec<Value>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -44,6 +50,10 @@ pub struct ApprovalRequest {
     pub request_id: String,
     pub tool_name: String,
     pub tool_input: Value,
+    pub permission_mode: Option<String>,
+    pub permission_suggestions: Vec<Value>,
+    pub transcript_path: Option<String>,
+    pub transcript_offset: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -67,25 +77,32 @@ pub struct Session {
     pub started_at: u64,
     pub last_event_at: u64,
     pub current_tool: Option<String>,
+    pub permission_mode: Option<String>,
     pub pending_approval: Option<ApprovalRequest>,
 }
 
 #[derive(Default)]
 pub struct SessionManager {
     sessions: HashMap<String, Session>,
-    allowlist: HashSet<AllowlistEntry>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct AllowlistEntry {
-    tool_name: String,
-    bash_command: Option<String>,
 }
 
 impl SessionManager {
-    fn apply_event(&mut self, payload: ClaudeHookPayload, responses_dir: &Path) -> Vec<Session> {
+    fn apply_event(&mut self, payload: ClaudeHookPayload) -> Vec<Session> {
+        eprintln!(
+            "mngr apply_event: event={} session_id={}",
+            payload.hook_event_name, payload.session_id
+        );
+
         let now = now_ms();
         self.apply_timeouts(now);
+
+        let session_existed = self.sessions.contains_key(&payload.session_id);
+        if payload.hook_event_name == "UserPromptSubmit" {
+            eprintln!(
+                "mngr apply_event: UserPromptSubmit session_id={} existing_session={}",
+                payload.session_id, session_existed
+            );
+        }
 
         let session = self
             .sessions
@@ -98,46 +115,39 @@ impl SessionManager {
 
         match payload.hook_event_name.as_str() {
             "SessionStart" | "UserPromptSubmit" => {
+                eprintln!(
+                    "mngr apply_event: clearing pending_approval event={} session_id={} target_found={} had_pending={}",
+                    payload.hook_event_name,
+                    payload.session_id,
+                    session_existed,
+                    session.pending_approval.is_some()
+                );
                 session.status = SessionStatus::Working;
                 session.pending_approval = None;
             }
             "PreToolUse" => {
+                eprintln!(
+                    "mngr apply_event: clearing pending_approval event={} session_id={} target_found={} had_pending={}",
+                    payload.hook_event_name,
+                    payload.session_id,
+                    session_existed,
+                    session.pending_approval.is_some()
+                );
                 session.status = SessionStatus::Working;
                 session.current_tool = payload.tool_name.clone();
                 session.pending_approval = None;
-
-                if payload.gated {
-                    let request_id = payload.request_id.clone().unwrap_or_default();
-                    let tool_name = payload
-                        .tool_name
-                        .clone()
-                        .unwrap_or_else(|| "command".to_string());
-                    let tool_input = payload.tool_input.clone().unwrap_or(Value::Null);
-
-                    let allowlisted = self
-                        .allowlist
-                        .contains(&AllowlistEntry::from_tool(&tool_name, &tool_input));
-
-                    if !request_id.is_empty() && allowlisted {
-                        if let Err(error) =
-                            write_approval_response(responses_dir, &request_id, "allow", None)
-                        {
-                            eprintln!("failed to write allowlisted approval response: {error}");
-                        }
-                    } else if !request_id.is_empty() {
-                        session.status = SessionStatus::WaitingForApproval;
-                        session.current_tool = Some(tool_name.clone());
-                        session.pending_approval = Some(ApprovalRequest {
-                            request_id,
-                            tool_name,
-                            tool_input,
-                        });
-                    }
-                }
             }
             "PostToolUse" => {
+                eprintln!(
+                    "mngr apply_event: clearing pending_approval event={} session_id={} target_found={} had_pending={}",
+                    payload.hook_event_name,
+                    payload.session_id,
+                    session_existed,
+                    session.pending_approval.is_some()
+                );
                 session.status = SessionStatus::Working;
                 session.current_tool = None;
+                session.pending_approval = None;
             }
             "PermissionRequest" => {
                 let tool_name = payload
@@ -145,12 +155,22 @@ impl SessionManager {
                     .clone()
                     .unwrap_or_else(|| "command".to_string());
                 let tool_input = payload.tool_input.clone().unwrap_or(Value::Null);
+                session.permission_mode = payload.permission_mode.clone();
                 session.status = SessionStatus::WaitingForApproval;
                 session.current_tool = Some(tool_name.clone());
+                let transcript_offset = payload
+                    .transcript_path
+                    .as_deref()
+                    .and_then(transcript_end_offset)
+                    .unwrap_or(0);
                 session.pending_approval = Some(ApprovalRequest {
                     request_id: payload.request_id.clone().unwrap_or_default(),
                     tool_name,
                     tool_input,
+                    permission_mode: payload.permission_mode.clone(),
+                    permission_suggestions: payload.permission_suggestions.clone(),
+                    transcript_path: payload.transcript_path.clone(),
+                    transcript_offset,
                 });
             }
             "Notification" => {
@@ -165,6 +185,13 @@ impl SessionManager {
                 }
             }
             "Stop" => {
+                eprintln!(
+                    "mngr apply_event: clearing pending_approval event={} session_id={} target_found={} had_pending={}",
+                    payload.hook_event_name,
+                    payload.session_id,
+                    session_existed,
+                    session.pending_approval.is_some()
+                );
                 session.status = SessionStatus::Idle;
                 session.current_tool = None;
                 session.pending_approval = None;
@@ -175,9 +202,7 @@ impl SessionManager {
         self.snapshot()
     }
 
-    fn resolve_approval(&mut self, request_id: &str, decision: &str, always: bool) -> Vec<Session> {
-        let mut allowlist_entry = None;
-
+    fn resolve_approval(&mut self, request_id: &str) -> Vec<Session> {
         for session in self.sessions.values_mut() {
             let Some(pending) = &session.pending_approval else {
                 continue;
@@ -186,23 +211,48 @@ impl SessionManager {
                 continue;
             }
 
-            if always && decision == "allow" {
-                allowlist_entry = Some(AllowlistEntry::from_tool(
-                    &pending.tool_name,
-                    &pending.tool_input,
-                ));
-            }
-
             session.status = SessionStatus::Working;
             session.pending_approval = None;
             break;
         }
 
-        if let Some(entry) = allowlist_entry {
-            self.allowlist.insert(entry);
+        self.snapshot()
+    }
+
+    fn poll_transcript_denials(&mut self) -> bool {
+        let mut changed = false;
+
+        for session in self.sessions.values_mut() {
+            if session.status != SessionStatus::WaitingForApproval {
+                continue;
+            }
+
+            let Some(pending) = session.pending_approval.as_mut() else {
+                continue;
+            };
+            let Some(transcript_path) = pending.transcript_path.as_deref() else {
+                continue;
+            };
+
+            let Ok(poll_result) =
+                poll_transcript_for_denial(Path::new(transcript_path), pending.transcript_offset)
+            else {
+                continue;
+            };
+
+            pending.transcript_offset = poll_result.offset;
+            if poll_result.denied {
+                session.status = if poll_result.stop_after_denial {
+                    SessionStatus::Idle
+                } else {
+                    SessionStatus::Working
+                };
+                session.pending_approval = None;
+                changed = true;
+            }
         }
 
-        self.snapshot()
+        changed
     }
 
     fn snapshot(&mut self) -> Vec<Session> {
@@ -232,24 +282,6 @@ impl SessionManager {
     }
 }
 
-impl AllowlistEntry {
-    fn from_tool(tool_name: &str, tool_input: &Value) -> Self {
-        let bash_command = if tool_name == "Bash" {
-            tool_input
-                .get("command")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-        } else {
-            None
-        };
-
-        Self {
-            tool_name: tool_name.to_string(),
-            bash_command,
-        }
-    }
-}
-
 impl Session {
     fn new(payload: &ClaudeHookPayload, now: u64) -> Self {
         Self {
@@ -261,6 +293,7 @@ impl Session {
             started_at: now,
             last_event_at: now,
             current_tool: None,
+            permission_mode: payload.permission_mode.clone(),
             pending_approval: None,
         }
     }
@@ -314,11 +347,10 @@ fn emit_sessions(app: &tauri::AppHandle, sessions: Vec<Session>) {
 }
 
 fn update_sessions(app: &tauri::AppHandle, payload: ClaudeHookPayload) {
-    let responses_dir = responses_dir();
     let sessions = {
         let store = app.state::<SessionStore>();
         let mut manager = store.0.lock().expect("session manager mutex poisoned");
-        manager.apply_event(payload, &responses_dir)
+        manager.apply_event(payload)
     };
     emit_sessions(app, sessions);
 }
@@ -341,18 +373,24 @@ fn resolve_approval(
     request_id: String,
     decision: String,
     reason: Option<String>,
-    always: bool,
+    updated_permissions: Option<Vec<Value>>,
 ) -> Result<Vec<Session>, String> {
-    if !matches!(decision.as_str(), "allow" | "deny" | "ask") {
-        return Err("decision must be allow, deny, or ask".to_string());
+    if !matches!(decision.as_str(), "allow" | "deny") {
+        return Err("decision must be allow or deny".to_string());
     }
 
-    write_approval_response(&responses_dir(), &request_id, &decision, reason.as_deref())
-        .map_err(|error| error.to_string())?;
+    write_approval_response(
+        &responses_dir(),
+        &request_id,
+        &decision,
+        reason.as_deref(),
+        updated_permissions.as_ref(),
+    )
+    .map_err(|error| error.to_string())?;
 
     let sessions = {
         let mut manager = store.0.lock().expect("session manager mutex poisoned");
-        manager.resolve_approval(&request_id, &decision, always)
+        manager.resolve_approval(&request_id)
     };
     emit_sessions(&app, sessions.clone());
     Ok(sessions)
@@ -455,7 +493,7 @@ fn ensure_hook_group_command_timeout(group: &mut Value, command: &str) -> bool {
                     && hook.get("command").and_then(Value::as_str) == Some(command);
                 if is_command {
                     if let Some(object) = hook.as_object_mut() {
-                        object.insert("timeout".to_string(), json!(600));
+                        object.insert("timeout".to_string(), json!(3600));
                     }
                     matched = true;
                 }
@@ -468,7 +506,10 @@ fn ensure_hook_group_command_timeout(group: &mut Value, command: &str) -> bool {
 fn hook_group_for(event_name: &str, command: &str) -> Value {
     let mut group = serde_json::Map::new();
 
-    if matches!(event_name, "PreToolUse" | "PostToolUse") {
+    if matches!(
+        event_name,
+        "PreToolUse" | "PostToolUse" | "PermissionRequest"
+    ) {
         group.insert("matcher".to_string(), json!("*"));
     }
 
@@ -478,7 +519,7 @@ fn hook_group_for(event_name: &str, command: &str) -> Value {
             {
                 "type": "command",
                 "command": command,
-                "timeout": 600
+                "timeout": 3600
             }
         ]),
     );
@@ -499,14 +540,22 @@ fn write_approval_response(
     request_id: &str,
     decision: &str,
     reason: Option<&str>,
+    updated_permissions: Option<&Vec<Value>>,
 ) -> std::io::Result<()> {
     fs::create_dir_all(responses_dir)?;
     let final_path = responses_dir.join(format!("{request_id}.json"));
     let tmp_path = responses_dir.join(format!("{request_id}.json.tmp"));
-    let body = json!({
+    let mut body = json!({
         "decision": decision,
         "reason": reason.unwrap_or("")
     });
+
+    if decision == "allow" {
+        if let Some(updated_permissions) = updated_permissions {
+            body["updatedPermissions"] = Value::Array(updated_permissions.clone());
+        }
+    }
+
     fs::write(&tmp_path, body.to_string())?;
     fs::rename(tmp_path, final_path)
 }
@@ -544,6 +593,7 @@ pub fn run() {
             position_overlay_window(app.handle());
             start_pipe_listener(app.handle().clone());
             start_session_cleanup(app.handle().clone());
+            start_transcript_watcher(app.handle().clone());
             start_cursor_watcher(app.handle().clone());
             Ok(())
         })
@@ -613,6 +663,136 @@ fn start_cursor_watcher(app: tauri::AppHandle) {
             }
             last = Some((x, y));
             let _ = window.emit("cursor-pos", serde_json::json!({ "x": x, "y": y }));
+        }
+    });
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TranscriptPollResult {
+    offset: u64,
+    denied: bool,
+    stop_after_denial: bool,
+}
+
+fn transcript_end_offset(path: &str) -> Option<u64> {
+    fs::metadata(path).ok().map(|metadata| metadata.len())
+}
+
+fn poll_transcript_for_denial(path: &Path, offset: u64) -> std::io::Result<TranscriptPollResult> {
+    let mut file = fs::File::open(path)?;
+    let len = file.metadata()?.len();
+    let start = offset.min(len);
+    file.seek(SeekFrom::Start(start))?;
+
+    let mut appended = String::new();
+    file.read_to_string(&mut appended)?;
+
+    let Some(last_newline) = appended.rfind('\n') else {
+        return Ok(TranscriptPollResult {
+            offset: start,
+            denied: false,
+            stop_after_denial: false,
+        });
+    };
+
+    let complete = &appended[..=last_newline];
+    let next_offset = start + complete.len() as u64;
+    let mut denied = false;
+    let mut stop_after_denial = false;
+
+    for line in complete.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
+            continue;
+        };
+
+        if denied && transcript_line_is_stop(&value) {
+            stop_after_denial = true;
+        }
+
+        if transcript_line_is_terminal_denial(&value) {
+            denied = true;
+        }
+    }
+
+    Ok(TranscriptPollResult {
+        offset: next_offset,
+        denied,
+        stop_after_denial,
+    })
+}
+
+fn transcript_line_is_terminal_denial(value: &Value) -> bool {
+    json_contains_string_field(value, "toolDenialKind", "user-rejected")
+        || (json_contains_string_field(value, "role", "user")
+            && json_contains_tool_result_error(value))
+}
+
+fn transcript_line_is_stop(value: &Value) -> bool {
+    value.get("turn_duration").is_some()
+        || json_contains_string_field(value, "hook_event_name", "Stop")
+        || json_contains_string_field(value, "type", "stop")
+}
+
+fn json_contains_string_field(value: &Value, key: &str, expected: &str) -> bool {
+    match value {
+        Value::Object(object) => {
+            object
+                .get(key)
+                .and_then(Value::as_str)
+                .is_some_and(|actual| actual == expected)
+                || object
+                    .values()
+                    .any(|child| json_contains_string_field(child, key, expected))
+        }
+        Value::Array(items) => items
+            .iter()
+            .any(|child| json_contains_string_field(child, key, expected)),
+        _ => false,
+    }
+}
+
+fn json_contains_tool_result_error(value: &Value) -> bool {
+    match value {
+        Value::Object(object) => {
+            let is_tool_result = object
+                .get("type")
+                .and_then(Value::as_str)
+                .is_some_and(|kind| kind == "tool_result");
+            let is_error = object
+                .get("is_error")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+
+            (is_tool_result && is_error) || object.values().any(json_contains_tool_result_error)
+        }
+        Value::Array(items) => items.iter().any(json_contains_tool_result_error),
+        _ => false,
+    }
+}
+
+fn start_transcript_watcher(app: tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            sleep(Duration::from_millis(500)).await;
+            let changed = {
+                let store = app.state::<SessionStore>();
+                let mut manager = store.0.lock().expect("session manager mutex poisoned");
+                manager.poll_transcript_denials()
+            };
+
+            if changed {
+                let sessions = {
+                    let store = app.state::<SessionStore>();
+                    let mut manager = store.0.lock().expect("session manager mutex poisoned");
+                    manager.snapshot()
+                };
+                emit_sessions(&app, sessions);
+            }
         }
     });
 }
@@ -707,38 +887,168 @@ mod tests {
             hook_event_name: "PreToolUse".to_string(),
             cwd: "C:\\work\\project".to_string(),
             request_id: Some(request_id.to_string()),
-            gated: true,
+            permission_mode: None,
             tool_name: Some("Bash".to_string()),
             tool_input: Some(json!({ "command": command })),
             tool_response: None,
+            transcript_path: None,
+            permission_suggestions: Vec::new(),
+            extra: BTreeMap::new(),
+        }
+    }
+
+    fn permission_request_payload(request_id: &str) -> ClaudeHookPayload {
+        ClaudeHookPayload {
+            session_id: "session-1".to_string(),
+            hook_event_name: "PermissionRequest".to_string(),
+            cwd: "C:\\work\\project".to_string(),
+            request_id: Some(request_id.to_string()),
+            permission_mode: Some("default".to_string()),
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(json!({ "command": "npm test" })),
+            tool_response: None,
+            transcript_path: None,
+            permission_suggestions: vec![
+                json!({
+                    "type": "addDirectories",
+                    "directories": ["C:\\work\\project"],
+                    "destination": "session"
+                }),
+                json!({
+                    "type": "setMode",
+                    "mode": "acceptEdits",
+                    "destination": "session"
+                }),
+            ],
+            extra: BTreeMap::new(),
+        }
+    }
+
+    fn session_event_payload(hook_event_name: &str) -> ClaudeHookPayload {
+        ClaudeHookPayload {
+            session_id: "session-1".to_string(),
+            hook_event_name: hook_event_name.to_string(),
+            cwd: "C:\\work\\project".to_string(),
+            request_id: None,
+            permission_mode: None,
+            tool_name: None,
+            tool_input: None,
+            tool_response: None,
+            transcript_path: None,
+            permission_suggestions: Vec::new(),
             extra: BTreeMap::new(),
         }
     }
 
     #[test]
-    fn gated_pre_tool_use_surfaces_request_id() {
-        let dir = test_dir("gated");
+    fn pre_tool_use_updates_current_tool_without_approval() {
         let mut manager = SessionManager::default();
 
-        let sessions = manager.apply_event(pre_tool_payload("req-1", "npm test"), &dir);
+        let sessions = manager.apply_event(pre_tool_payload("req-1", "npm test"));
+
+        assert_eq!(sessions[0].status, SessionStatus::Working);
+        assert_eq!(sessions[0].current_tool.as_deref(), Some("Bash"));
+        assert!(sessions[0].pending_approval.is_none());
+    }
+
+    #[test]
+    fn permission_request_surfaces_suggestions_and_mode() {
+        let mut manager = SessionManager::default();
+
+        let sessions = manager.apply_event(permission_request_payload("req-2"));
+
+        assert_eq!(sessions[0].status, SessionStatus::WaitingForApproval);
+        assert_eq!(sessions[0].permission_mode.as_deref(), Some("default"));
+        let pending = sessions[0]
+            .pending_approval
+            .as_ref()
+            .expect("pending approval");
+        assert_eq!(pending.request_id, "req-2");
+        assert_eq!(pending.tool_name, "Bash");
+        assert_eq!(pending.permission_mode.as_deref(), Some("default"));
+        assert_eq!(pending.permission_suggestions.len(), 2);
+        assert_eq!(pending.permission_suggestions[0]["type"], "addDirectories");
+        assert_eq!(pending.permission_suggestions[1]["mode"], "acceptEdits");
+    }
+
+    #[test]
+    fn stop_after_pending_approval_clears_card() {
+        let mut manager = SessionManager::default();
+        manager.apply_event(permission_request_payload("req-stop"));
+
+        let sessions = manager.apply_event(session_event_payload("Stop"));
+
+        assert_eq!(sessions[0].status, SessionStatus::Idle);
+        assert!(sessions[0].pending_approval.is_none());
+    }
+
+    #[test]
+    fn user_prompt_after_pending_approval_clears_card() {
+        let mut manager = SessionManager::default();
+        manager.apply_event(permission_request_payload("req-prompt"));
+
+        let sessions = manager.apply_event(session_event_payload("UserPromptSubmit"));
+
+        assert_eq!(sessions[0].status, SessionStatus::Working);
+        assert!(sessions[0].pending_approval.is_none());
+    }
+
+    #[test]
+    fn new_permission_request_replaces_pending_approval() {
+        let mut manager = SessionManager::default();
+        manager.apply_event(permission_request_payload("req-old"));
+
+        let sessions = manager.apply_event(permission_request_payload("req-new"));
 
         assert_eq!(sessions[0].status, SessionStatus::WaitingForApproval);
         let pending = sessions[0]
             .pending_approval
             .as_ref()
             .expect("pending approval");
-        assert_eq!(pending.request_id, "req-1");
-        assert_eq!(pending.tool_name, "Bash");
+        assert_eq!(pending.request_id, "req-new");
+    }
+
+    #[test]
+    fn transcript_user_rejected_denial_clears_pending_approval() {
+        let dir = test_dir("transcript-denial");
+        let transcript_path = dir.join("session.jsonl");
+        fs::write(&transcript_path, "{\"type\":\"prior\"}\n").expect("write transcript seed");
+
+        let mut manager = SessionManager::default();
+        let mut payload = permission_request_payload("req-transcript-denial");
+        payload.transcript_path = Some(transcript_path.display().to_string());
+        manager.apply_event(payload);
+
+        let current = fs::read_to_string(&transcript_path).expect("read transcript seed");
+        fs::write(
+            &transcript_path,
+            format!(
+                "{current}{}\n",
+                json!({
+                    "toolDenialKind": "user-rejected",
+                    "tool_result": {
+                        "is_error": true
+                    }
+                })
+            ),
+        )
+        .expect("append transcript denial");
+
+        assert!(manager.poll_transcript_denials());
+        let sessions = manager.snapshot();
+        assert_eq!(sessions[0].status, SessionStatus::Working);
+        assert!(sessions[0].pending_approval.is_none());
     }
 
     #[test]
     fn response_file_write_uses_final_json_path() {
         let dir = test_dir("response-write");
 
-        write_approval_response(&dir, "req-2", "deny", Some("not today")).expect("write response");
+        write_approval_response(&dir, "req-3", "deny", Some("not today"), None)
+            .expect("write response");
 
-        let final_path = dir.join("req-2.json");
-        let tmp_path = dir.join("req-2.json.tmp");
+        let final_path = dir.join("req-3.json");
+        let tmp_path = dir.join("req-3.json.tmp");
         assert!(final_path.exists());
         assert!(!tmp_path.exists());
         let value: Value =
@@ -746,21 +1056,27 @@ mod tests {
                 .expect("parse response");
         assert_eq!(value["decision"], "deny");
         assert_eq!(value["reason"], "not today");
+        assert!(value.get("updatedPermissions").is_none());
     }
 
     #[test]
-    fn always_allow_writes_immediate_response_for_matching_bash_command() {
-        let dir = test_dir("allowlist");
-        let mut manager = SessionManager::default();
+    fn chosen_suggestion_is_echoed_into_updated_permissions() {
+        let dir = test_dir("updated-permissions");
+        let suggestion = json!({
+            "type": "addDirectories",
+            "directories": ["C:\\work\\project"],
+            "destination": "session"
+        });
+        let updated_permissions = vec![suggestion.clone()];
 
-        manager.apply_event(pre_tool_payload("req-3", "npm test"), &dir);
-        manager.resolve_approval("req-3", "allow", true);
-        manager.apply_event(pre_tool_payload("req-4", "npm test"), &dir);
+        write_approval_response(&dir, "req-4", "allow", None, Some(&updated_permissions))
+            .expect("write response");
 
-        assert!(dir.join("req-4.json").exists());
-        assert!(manager
-            .snapshot()
-            .iter()
-            .all(|session| session.pending_approval.is_none()));
+        let value: Value = serde_json::from_str(
+            &fs::read_to_string(dir.join("req-4.json")).expect("read response"),
+        )
+        .expect("parse response");
+        assert_eq!(value["decision"], "allow");
+        assert_eq!(value["updatedPermissions"], json!([suggestion]));
     }
 }

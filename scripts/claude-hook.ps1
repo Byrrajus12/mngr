@@ -1,17 +1,14 @@
 $ErrorActionPreference = "SilentlyContinue"
 
-$GatedTools = @("Bash", "Write", "Edit", "MultiEdit", "NotebookEdit")
-
 function ConvertTo-MngrHookPayload {
   param([string]$PayloadText)
 
   $hook = $PayloadText | ConvertFrom-Json
-  $toolName = [string]$hook.tool_name
-  $requestId = [guid]::NewGuid().ToString()
-  $gated = $hook.hook_event_name -eq "PreToolUse" -and $GatedTools -contains $toolName
-
-  $hook | Add-Member -NotePropertyName "request_id" -NotePropertyValue $requestId -Force
-  $hook | Add-Member -NotePropertyName "gated" -NotePropertyValue $gated -Force
+  Add-Content "$env:LOCALAPPDATA\mngr\hook-events.log" "$(Get-Date -Format o) $($hook.hook_event_name)"
+  if ($hook.hook_event_name -eq "PermissionRequest") {
+    $requestId = [guid]::NewGuid().ToString()
+    $hook | Add-Member -NotePropertyName "request_id" -NotePropertyValue $requestId -Force
+  }
 
   return $hook
 }
@@ -38,15 +35,28 @@ function Read-MngrApprovalResponse {
 function ConvertTo-ClaudePermissionOutput {
   param(
     [string]$Decision,
-    [string]$Reason
+    [string]$Reason,
+    $UpdatedPermissions
   )
 
-  $validDecision = if (@("allow", "deny", "ask") -contains $Decision) { $Decision } else { "ask" }
-  return @{
+  $validDecision = if (@("allow", "deny") -contains $Decision) { $Decision } else { "deny" }
+  $decisionObject = @{
+    behavior = $validDecision
+  }
+
+  if ($validDecision -eq "deny") {
+    $decisionObject.message = if ($null -eq $Reason) { "" } else { $Reason }
+    $decisionObject.interrupt = $false
+  } elseif ($null -ne $UpdatedPermissions) {
+    $decisionObject.updatedPermissions = $UpdatedPermissions
+  }
+
+  @{
+    "continue" = $true
+    suppressOutput = $true
     hookSpecificOutput = @{
-      hookEventName = "PreToolUse"
-      permissionDecision = $validDecision
-      permissionDecisionReason = if ($null -eq $Reason) { "" } else { $Reason }
+      hookEventName = "PermissionRequest"
+      decision = $decisionObject
     }
   } | ConvertTo-Json -Compress -Depth 10
 }
@@ -67,6 +77,14 @@ if ($env:MNGR_HOOK_TEST_MODE -eq "payload") {
   exit 0
 }
 
+if ($env:MNGR_HOOK_TEST_MODE -eq "permission-output") {
+  $decision = if ([string]::IsNullOrWhiteSpace($env:MNGR_HOOK_TEST_DECISION)) { "allow" } else { $env:MNGR_HOOK_TEST_DECISION }
+  $reason = if ([string]::IsNullOrWhiteSpace($env:MNGR_HOOK_TEST_REASON)) { "" } else { $env:MNGR_HOOK_TEST_REASON }
+  $updatedPermissions = if ($decision -eq "allow") { $mngrPayload.permission_suggestions } else { $null }
+  ConvertTo-ClaudePermissionOutput -Decision $decision -Reason $reason -UpdatedPermissions $updatedPermissions
+  exit 0
+}
+
 $jsonLine = ($mngrPayload | ConvertTo-Json -Compress -Depth 100)
 
 try {
@@ -83,24 +101,23 @@ try {
   exit 0
 }
 
-if (-not $mngrPayload.gated) {
+if ($mngrPayload.hook_event_name -ne "PermissionRequest") {
   exit 0
 }
 
 $responsesRoot = Join-Path $env:LOCALAPPDATA "mngr\responses"
 $responsePath = Join-Path $responsesRoot "$($mngrPayload.request_id).json"
-$deadline = (Get-Date).AddSeconds(570)
+$deadline = (Get-Date).AddSeconds(3600)
 
 while ((Get-Date) -lt $deadline) {
   $response = Read-MngrApprovalResponse -Path $responsePath
   if ($null -ne $response) {
     Remove-Item -LiteralPath $responsePath -Force -ErrorAction SilentlyContinue
-    ConvertTo-ClaudePermissionOutput -Decision ([string]$response.decision) -Reason ([string]$response.reason)
+    ConvertTo-ClaudePermissionOutput -Decision ([string]$response.decision) -Reason ([string]$response.reason) -UpdatedPermissions $response.updatedPermissions
     exit 0
   }
 
   Start-Sleep -Milliseconds 200
 }
 
-ConvertTo-ClaudePermissionOutput -Decision "ask" -Reason "mngr approval timed out"
 exit 0

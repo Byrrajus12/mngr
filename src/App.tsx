@@ -270,6 +270,7 @@ function App() {
         project_path: `C:\\demo\\${projectName}`,
         agent_type: id % 2 === 0 ? "codex" : "claude-code",
         current_tool: null,
+        permission_mode: null,
         pending_approval: null,
       },
     ]);
@@ -305,10 +306,24 @@ function App() {
       status: "WaitingForApproval",
       last_event_at: Date.now(),
       current_tool: "Bash",
+      permission_mode: "default",
       pending_approval: {
         request_id: `demo-${session.session_id}-approval`,
         tool_name: "Bash",
         tool_input: { command: "rm -rf node_modules && npm ci" },
+        permission_mode: "default",
+        permission_suggestions: [
+          {
+            type: "addDirectories",
+            directories: [session.project_path],
+            destination: "session",
+          },
+          {
+            type: "setMode",
+            mode: "acceptEdits",
+            destination: "session",
+          },
+        ],
       },
     }));
   }
@@ -319,6 +334,7 @@ function App() {
       status: "WaitingForInput",
       last_event_at: Date.now(),
       current_tool: null,
+      permission_mode: null,
       pending_approval: null,
     }));
   }
@@ -329,6 +345,7 @@ function App() {
       status: "Done",
       last_event_at: Date.now(),
       current_tool: null,
+      permission_mode: null,
       pending_approval: null,
     }));
   }

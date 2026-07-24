@@ -248,6 +248,7 @@
 
 .btns {
   display: flex;
+  flex-wrap: wrap;
   gap: 7px;
   margin-top: 9px;
 }
@@ -255,9 +256,12 @@
 .btns button,
 .pill {
   flex: none;
+  max-width: 100%;
   cursor: pointer;
   font-family: var(--font);
   font-size: 11px;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
   transition: transform .1s, background .15s;
 }
 
@@ -301,7 +305,7 @@
   background: rgba(52, 211, 153, 0.26);
 }
 
-.alwaysAllow {
+.suggestionAllow {
   padding: 6px 10px;
   border: 1px solid rgba(127, 208, 192, 0.32);
   border-radius: 8px;
@@ -309,7 +313,7 @@
   color: #a8e4da;
 }
 
-.alwaysAllow:hover {
+.suggestionAllow:hover {
   background: rgba(127, 208, 192, 0.18);
 }
 
