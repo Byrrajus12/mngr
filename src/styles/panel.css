@@ -52,16 +52,24 @@
 }
 
 .usage {
+  display: grid;
+  gap: 6px;
   margin-top: 8px;
-  width: 150px;
+  width: 190px;
+}
+
+.usage.stale {
+  opacity: .72;
 }
 
 .usage .txt {
   display: flex;
   justify-content: space-between;
+  gap: 10px;
   margin-bottom: 4px;
   color: rgba(255, 255, 255, 0.42);
   font-size: 10px;
+  white-space: nowrap;
 }
 
 .usage .track {
@@ -72,10 +80,13 @@
 }
 
 .usage .fill {
-  width: 62%;
   height: 100%;
   border-radius: 2px;
   background: linear-gradient(90deg, var(--blue), var(--emerald));
+}
+
+.usageBar.empty .fill {
+  background: rgba(255, 255, 255, 0.12);
 }
 
 .pclose {

@@ -49,3 +49,14 @@ export type Session = {
   permission_mode?: string | null;
   pending_approval?: PendingRequest | null;
 };
+
+export type ClaudeUsageWindow = {
+  used_percentage: number;
+  resets_at?: number | null;
+};
+
+export type ClaudeUsageState = {
+  five_hour?: ClaudeUsageWindow | null;
+  seven_day?: ClaudeUsageWindow | null;
+  last_updated?: number | null;
+};

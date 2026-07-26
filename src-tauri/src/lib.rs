@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
@@ -13,6 +14,10 @@ const PIPE_NAME: &str = r"\\.\pipe\mngr";
 const DONE_AFTER_MS: u64 = 5 * 60 * 1000;
 const REMOVE_AFTER_MS: u64 = 30 * 60 * 1000;
 const RESPONSE_CLEANUP_AFTER_MS: u64 = 10 * 60 * 1000;
+const STATUS_LINE_SCRIPT_NAME: &str = "claude-statusline.ps1";
+const STATUS_LINE_ORIGINAL_COMMAND_NAME: &str = "claude-statusline-original.txt";
+const MNGR_ORIGINAL_STATUS_LINE_KEY: &str = "_mngrOriginalStatusLine";
+const STATUS_LINE_REFRESH_INTERVAL_MS: u64 = 5000;
 const CLAUDE_EVENTS: &[&str] = &[
     "PreToolUse",
     "PostToolUse",
@@ -109,6 +114,29 @@ pub struct Session {
     pub current_tool: Option<String>,
     pub permission_mode: Option<String>,
     pub pending_approval: Option<PendingRequest>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct ClaudeUsageWindow {
+    pub used_percentage: f64,
+    pub resets_at: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct ClaudeUsageState {
+    pub five_hour: Option<ClaudeUsageWindow>,
+    pub seven_day: Option<ClaudeUsageWindow>,
+    pub last_updated: Option<u64>,
+}
+
+impl ClaudeUsageState {
+    fn empty() -> Self {
+        Self {
+            five_hour: None,
+            seven_day: None,
+            last_updated: None,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -494,6 +522,11 @@ fn install_claude_hooks() -> Result<String, String> {
 }
 
 #[tauri::command]
+fn get_claude_usage() -> Result<ClaudeUsageState, String> {
+    read_claude_usage_cache(&claude_usage_cache_path()).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn resolve_approval(
     app: tauri::AppHandle,
     store: State<'_, SessionStore>,
@@ -578,45 +611,124 @@ fn install_claude_hooks_inner() -> Result<String, InstallError> {
     let settings_dir = home_dir.join(".claude");
     let settings_path = settings_dir.join("settings.json");
     let mngr_dir = settings_dir.join("mngr");
+    install_claude_hooks_at(&settings_path, &mngr_dir)?;
+    Ok(settings_path.display().to_string())
+}
+
+fn install_claude_hooks_at(settings_path: &Path, mngr_dir: &Path) -> Result<(), InstallError> {
     let hook_script = mngr_dir.join("claude-hook.ps1");
-    fs::create_dir_all(&mngr_dir)?;
-    fs::write(&hook_script, include_str!("../../scripts/claude-hook.ps1"))?;
+    let status_line_script = mngr_dir.join(STATUS_LINE_SCRIPT_NAME);
+    fs::create_dir_all(mngr_dir)?;
+    write_if_changed(
+        &hook_script,
+        include_str!("../../scripts/claude-hook.ps1").as_bytes(),
+    )?;
+    write_if_changed(
+        &status_line_script,
+        include_str!("../../scripts/claude-statusline.ps1").as_bytes(),
+    )?;
 
-    let mut settings = if settings_path.exists() {
-        let contents = fs::read_to_string(&settings_path)?;
-        if contents.trim().is_empty() {
-            json!({})
-        } else {
-            serde_json::from_str(&contents)?
-        }
-    } else {
-        json!({})
-    };
-
+    let mut settings = load_json_object(settings_path)?;
+    let original_settings = settings.clone();
     let settings_object = settings
         .as_object_mut()
-        .ok_or_else(|| InstallError::InvalidSettingsShape(settings_path.clone()))?;
+        .ok_or_else(|| InstallError::InvalidSettingsShape(settings_path.to_path_buf()))?;
 
     let hooks_value = settings_object.entry("hooks").or_insert_with(|| json!({}));
     let hooks_object = hooks_value
         .as_object_mut()
         .ok_or(InstallError::InvalidHooksShape)?;
 
-    let command = format!(
-        "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"{}\"",
-        hook_script.display()
-    );
-
+    let hook_command = powershell_file_command(&hook_script);
     for event_name in CLAUDE_EVENTS {
-        append_hook_group(hooks_object, event_name, &command);
+        append_hook_group(hooks_object, event_name, &hook_command);
     }
 
-    fs::write(
-        &settings_path,
-        serde_json::to_string_pretty(&settings)? + "\n",
-    )?;
+    configure_status_line(settings_object, &status_line_script, mngr_dir)?;
 
-    Ok(settings_path.display().to_string())
+    if settings != original_settings {
+        write_if_changed(
+            settings_path,
+            (serde_json::to_string_pretty(&settings)? + "\n").as_bytes(),
+        )?;
+    }
+
+    Ok(())
+}
+
+fn write_if_changed(path: &Path, contents: &[u8]) -> Result<(), std::io::Error> {
+    if fs::read(path).is_ok_and(|current| current == contents) {
+        return Ok(());
+    }
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, contents)
+}
+
+fn load_json_object(path: &Path) -> Result<Value, InstallError> {
+    if path.exists() {
+        let contents = fs::read_to_string(path)?;
+        if contents.trim().is_empty() {
+            Ok(json!({}))
+        } else {
+            Ok(serde_json::from_str(&contents)?)
+        }
+    } else {
+        Ok(json!({}))
+    }
+}
+
+fn powershell_file_command(script: &Path) -> String {
+    format!(
+        "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"{}\"",
+        script.display()
+    )
+}
+
+fn configure_status_line(
+    settings_object: &mut serde_json::Map<String, Value>,
+    status_line_script: &Path,
+    mngr_dir: &Path,
+) -> Result<(), InstallError> {
+    let managed_command = powershell_file_command(status_line_script);
+    let original_command_path = mngr_dir.join(STATUS_LINE_ORIGINAL_COMMAND_NAME);
+    let current = settings_object.get("statusLine").cloned();
+
+    if let Some(current_status_line) = current.as_ref() {
+        if !is_mngr_status_line(current_status_line, &managed_command) {
+            if let Some(command) = current_status_line.get("command").and_then(Value::as_str) {
+                if !command.trim().is_empty() {
+                    write_if_changed(&original_command_path, command.as_bytes())?;
+                }
+            }
+            settings_object.insert(
+                MNGR_ORIGINAL_STATUS_LINE_KEY.to_string(),
+                current_status_line.clone(),
+            );
+        }
+    }
+
+    settings_object.insert(
+        "statusLine".to_string(),
+        json!({
+            "type": "command",
+            "command": managed_command,
+            "refreshInterval": STATUS_LINE_REFRESH_INTERVAL_MS
+        }),
+    );
+
+    Ok(())
+}
+
+fn is_mngr_status_line(status_line: &Value, managed_command: &str) -> bool {
+    status_line
+        .get("command")
+        .and_then(Value::as_str)
+        .is_some_and(|command| {
+            command == managed_command || command.contains(STATUS_LINE_SCRIPT_NAME)
+        })
 }
 
 fn append_hook_group(
@@ -686,12 +798,85 @@ fn hook_group_for(event_name: &str, command: &str) -> Value {
     Value::Object(group)
 }
 
-fn responses_dir() -> PathBuf {
+fn local_app_data_dir() -> PathBuf {
     std::env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
         .unwrap_or_else(std::env::temp_dir)
-        .join("mngr")
-        .join("responses")
+}
+
+fn responses_dir() -> PathBuf {
+    local_app_data_dir().join("mngr").join("responses")
+}
+
+fn claude_usage_cache_path() -> PathBuf {
+    local_app_data_dir().join("mngr").join("claude-usage.json")
+}
+
+fn read_claude_usage_cache(path: &Path) -> Result<ClaudeUsageState, std::io::Error> {
+    if !path.exists() {
+        return Ok(ClaudeUsageState::empty());
+    }
+
+    let contents = fs::read_to_string(path)?;
+    let payload = serde_json::from_str::<Value>(&contents).unwrap_or(Value::Null);
+    let last_updated = fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(system_time_ms);
+
+    Ok(ClaudeUsageState {
+        five_hour: parse_usage_window(payload.get("five_hour")),
+        seven_day: parse_usage_window(payload.get("seven_day")),
+        last_updated,
+    })
+}
+
+fn parse_usage_window(value: Option<&Value>) -> Option<ClaudeUsageWindow> {
+    let object = value?.as_object()?;
+    let used_percentage = number_value(object.get("used_percentage"))
+        .or_else(|| number_value(object.get("utilization")))?;
+    Some(ClaudeUsageWindow {
+        used_percentage,
+        resets_at: object.get("resets_at").and_then(reset_time_ms),
+    })
+}
+
+fn number_value(value: Option<&Value>) -> Option<f64> {
+    match value? {
+        Value::Number(number) => number.as_f64(),
+        Value::String(text) => text.parse::<f64>().ok(),
+        _ => None,
+    }
+}
+
+fn reset_time_ms(value: &Value) -> Option<u64> {
+    match value {
+        Value::Number(number) => number.as_f64().and_then(seconds_to_ms),
+        Value::String(text) => text
+            .parse::<f64>()
+            .ok()
+            .and_then(seconds_to_ms)
+            .or_else(|| {
+                DateTime::parse_from_rfc3339(text)
+                    .ok()
+                    .map(|date| date.with_timezone(&Utc).timestamp_millis())
+                    .and_then(|ms| u64::try_from(ms).ok())
+            }),
+        _ => None,
+    }
+}
+
+fn seconds_to_ms(seconds: f64) -> Option<u64> {
+    if !seconds.is_finite() || seconds < 0.0 {
+        return None;
+    }
+    Some((seconds * 1000.0).round() as u64)
+}
+
+fn system_time_ms(time: SystemTime) -> Option<u64> {
+    time.duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_millis() as u64)
 }
 
 fn write_approval_response(
@@ -774,6 +959,9 @@ pub fn run() {
             if let Err(error) = cleanup_responses_dir(&responses_dir(), SystemTime::now()) {
                 eprintln!("failed to prepare approval response dir: {error}");
             }
+            if let Err(error) = install_claude_hooks_inner() {
+                eprintln!("failed to install Claude Code integration: {error}");
+            }
             position_overlay_window(app.handle());
             start_pipe_listener(app.handle().clone());
             start_session_cleanup(app.handle().clone());
@@ -784,6 +972,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_sessions,
             install_claude_hooks,
+            get_claude_usage,
             resolve_approval,
             resolve_question,
             expand_panel
@@ -1338,6 +1527,242 @@ mod tests {
         let sessions = manager.resolve_question("req-question");
         assert_eq!(sessions[0].status, SessionStatus::Working);
         assert!(sessions[0].pending_approval.is_none());
+    }
+
+    #[test]
+    fn claude_usage_cache_parses_percentage_shapes_and_reset_formats() {
+        let dir = test_dir("claude-usage-cache");
+        let path = dir.join("claude-usage.json");
+        fs::write(
+            &path,
+            json!({
+                "five_hour": {
+                    "used_percentage": 59,
+                    "resets_at": 1785102600
+                },
+                "seven_day": {
+                    "utilization": "14.5",
+                    "resets_at": "2026-02-09T12:00:00.462679+00:00"
+                }
+            })
+            .to_string(),
+        )
+        .expect("write usage cache");
+
+        let usage = read_claude_usage_cache(&path).expect("read usage cache");
+
+        assert_eq!(usage.five_hour.as_ref().unwrap().used_percentage, 59.0);
+        assert_eq!(
+            usage.five_hour.as_ref().unwrap().resets_at,
+            Some(1_785_102_600_000)
+        );
+        assert_eq!(usage.seven_day.as_ref().unwrap().used_percentage, 14.5);
+        let expected_iso = DateTime::parse_from_rfc3339("2026-02-09T12:00:00.462679+00:00")
+            .unwrap()
+            .timestamp_millis() as u64;
+        assert_eq!(
+            usage.seven_day.as_ref().unwrap().resets_at,
+            Some(expected_iso)
+        );
+        assert!(usage.last_updated.is_some());
+    }
+
+    #[test]
+    fn missing_claude_usage_cache_returns_empty_state() {
+        let dir = test_dir("claude-usage-missing");
+
+        let usage = read_claude_usage_cache(&dir.join("missing.json")).expect("read missing usage");
+
+        assert_eq!(usage, ClaudeUsageState::empty());
+    }
+
+    #[test]
+    fn installer_preserves_settings_and_wraps_existing_status_line() {
+        let dir = test_dir("settings-wrap");
+        let settings_path = dir.join("settings.json");
+        let mngr_dir = dir.join("mngr");
+        fs::write(
+            &settings_path,
+            serde_json::to_string_pretty(&json!({
+                "hooks": {
+                    "Stop": [
+                        {
+                            "hooks": [
+                                { "type": "command", "command": "Write-Host done" }
+                            ]
+                        }
+                    ]
+                },
+                "enabledPlugins": {
+                    "claude-mem@thedotmack": true
+                },
+                "statusLine": {
+                    "type": "command",
+                    "command": "powershell.exe -NoProfile -Command \"Write-Output custom\"",
+                    "padding": 2
+                }
+            }))
+            .unwrap(),
+        )
+        .expect("write settings");
+
+        install_claude_hooks_at(&settings_path, &mngr_dir).expect("install hooks");
+
+        let settings: Value =
+            serde_json::from_str(&fs::read_to_string(&settings_path).expect("read settings"))
+                .expect("parse settings");
+        assert_eq!(settings["enabledPlugins"]["claude-mem@thedotmack"], true);
+        assert_eq!(
+            settings["hooks"]["Stop"][0]["hooks"][0]["command"],
+            "Write-Host done"
+        );
+        assert!(settings["hooks"]["PreToolUse"].is_array());
+        let status_command = settings["statusLine"]["command"].as_str().unwrap();
+        assert!(status_command.contains(STATUS_LINE_SCRIPT_NAME));
+        assert_eq!(
+            settings["statusLine"]["refreshInterval"],
+            STATUS_LINE_REFRESH_INTERVAL_MS
+        );
+        assert_eq!(
+            settings[MNGR_ORIGINAL_STATUS_LINE_KEY]["command"],
+            "powershell.exe -NoProfile -Command \"Write-Output custom\""
+        );
+        assert_eq!(
+            fs::read_to_string(mngr_dir.join(STATUS_LINE_ORIGINAL_COMMAND_NAME))
+                .expect("read original command"),
+            "powershell.exe -NoProfile -Command \"Write-Output custom\""
+        );
+    }
+
+    #[test]
+    fn install_if_needed_is_noop_when_current() {
+        use std::thread::sleep;
+        use std::time::Duration;
+
+        let dir = test_dir("settings-noop");
+        let settings_path = dir.join("settings.json");
+        let mngr_dir = dir.join("mngr");
+
+        install_claude_hooks_at(&settings_path, &mngr_dir).expect("first install");
+        let settings_before = fs::read_to_string(&settings_path).expect("read settings before");
+        let settings_modified_before = fs::metadata(&settings_path)
+            .expect("settings metadata before")
+            .modified()
+            .expect("settings modified before");
+        let hook_modified_before = fs::metadata(mngr_dir.join("claude-hook.ps1"))
+            .expect("hook metadata before")
+            .modified()
+            .expect("hook modified before");
+        let status_modified_before = fs::metadata(mngr_dir.join(STATUS_LINE_SCRIPT_NAME))
+            .expect("status metadata before")
+            .modified()
+            .expect("status modified before");
+
+        sleep(Duration::from_millis(1200));
+        install_claude_hooks_at(&settings_path, &mngr_dir).expect("second install");
+
+        assert_eq!(
+            fs::read_to_string(&settings_path).expect("read settings after"),
+            settings_before
+        );
+        assert_eq!(
+            fs::metadata(&settings_path)
+                .expect("settings metadata after")
+                .modified()
+                .expect("settings modified after"),
+            settings_modified_before
+        );
+        assert_eq!(
+            fs::metadata(mngr_dir.join("claude-hook.ps1"))
+                .expect("hook metadata after")
+                .modified()
+                .expect("hook modified after"),
+            hook_modified_before
+        );
+        assert_eq!(
+            fs::metadata(mngr_dir.join(STATUS_LINE_SCRIPT_NAME))
+                .expect("status metadata after")
+                .modified()
+                .expect("status modified after"),
+            status_modified_before
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn statusline_script_writes_cache_only_when_rate_limits_change() {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+        use std::thread::sleep;
+        use std::time::Duration;
+
+        let dir = test_dir("statusline-script");
+        let local_app_data = dir.join("local-app-data");
+        fs::create_dir_all(&local_app_data).expect("create local app data");
+        let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("scripts")
+            .join("claude-statusline.ps1");
+        let payload = json!({
+            "model": { "display_name": "Opus" },
+            "context_window": { "used_percentage": 31 },
+            "rate_limits": {
+                "five_hour": { "used_percentage": 59, "resets_at": 1785102600 },
+                "seven_day": { "used_percentage": 14, "resets_at": 1785351600 }
+            }
+        })
+        .to_string();
+
+        let run_script = |input: &str| {
+            let mut child = Command::new("powershell.exe")
+                .arg("-NoProfile")
+                .arg("-ExecutionPolicy")
+                .arg("Bypass")
+                .arg("-File")
+                .arg(&script)
+                .env("LOCALAPPDATA", &local_app_data)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+                .expect("spawn statusline script");
+            child
+                .stdin
+                .as_mut()
+                .unwrap()
+                .write_all(input.as_bytes())
+                .expect("write stdin");
+            child.wait_with_output().expect("wait statusline script")
+        };
+
+        let first = run_script(&payload);
+        assert!(first.status.success());
+        assert!(String::from_utf8_lossy(&first.stdout).contains("[Opus] 31% context"));
+        let cache_path = local_app_data.join("mngr").join("claude-usage.json");
+        let first_cache = fs::read_to_string(&cache_path).expect("read first cache");
+        assert!(first_cache.contains("five_hour"));
+        let first_modified = fs::metadata(&cache_path)
+            .expect("first metadata")
+            .modified()
+            .expect("first modified");
+
+        sleep(Duration::from_millis(1200));
+        let second = run_script(&payload);
+        assert!(second.status.success());
+        let second_modified = fs::metadata(&cache_path)
+            .expect("second metadata")
+            .modified()
+            .expect("second modified");
+        assert_eq!(first_modified, second_modified);
+
+        let changed_payload = payload.replace("59", "60");
+        sleep(Duration::from_millis(1200));
+        let third = run_script(&changed_payload);
+        assert!(third.status.success());
+        let third_modified = fs::metadata(&cache_path)
+            .expect("third metadata")
+            .modified()
+            .expect("third modified");
+        assert!(third_modified > second_modified);
     }
 
     #[test]
