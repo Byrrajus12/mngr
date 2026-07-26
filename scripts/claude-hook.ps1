@@ -1,4 +1,8 @@
 $ErrorActionPreference = "SilentlyContinue"
+$Utf8NoBom = [System.Text.UTF8Encoding]::new($false, $true)
+[Console]::InputEncoding = $Utf8NoBom
+[Console]::OutputEncoding = $Utf8NoBom
+
 
 function ConvertTo-MngrHookPayload {
   param([string]$PayloadText)
@@ -19,7 +23,7 @@ function Read-MngrApprovalResponse {
   for ($i = 0; $i -lt 10; $i++) {
     try {
       if (Test-Path -LiteralPath $Path) {
-        $content = Get-Content -Raw -LiteralPath $Path -ErrorAction Stop
+        $content = Get-Content -Raw -Encoding UTF8 -LiteralPath $Path -ErrorAction Stop
         if (-not [string]::IsNullOrWhiteSpace($content)) {
           return ($content | ConvertFrom-Json -ErrorAction Stop)
         }
@@ -30,6 +34,13 @@ function Read-MngrApprovalResponse {
   }
 
   return $null
+}
+
+function Read-MngrUtf8Stdin {
+  $inputStream = [Console]::OpenStandardInput()
+  $memory = [System.IO.MemoryStream]::new()
+  $inputStream.CopyTo($memory)
+  return $Utf8NoBom.GetString($memory.ToArray())
 }
 
 function ConvertTo-ClaudePermissionOutput {
@@ -61,7 +72,40 @@ function ConvertTo-ClaudePermissionOutput {
   } | ConvertTo-Json -Compress -Depth 10
 }
 
-$payload = [Console]::In.ReadToEnd()
+function Test-MngrQuestionResponse {
+  param($Response)
+
+  if ($null -eq $Response) { return $false }
+  $names = $Response.PSObject.Properties.Name
+  return ($names -contains "updatedInput") -or ($names -contains "answers") -or ($names -contains "answer")
+}
+
+function ConvertTo-ClaudeQuestionOutput {
+  param($Response)
+
+  $updatedInput = $Response.updatedInput
+  if ($null -eq $updatedInput) {
+    $updatedInput = @{
+      questions = $Response.questions
+      answers = $Response.answers
+      answer = $Response.answer
+    }
+  }
+
+  @{
+    "continue" = $true
+    suppressOutput = $true
+    hookSpecificOutput = @{
+      hookEventName = "PermissionRequest"
+      decision = @{
+        behavior = "allow"
+        updatedInput = $updatedInput
+      }
+    }
+  } | ConvertTo-Json -Compress -Depth 100
+}
+
+$payload = Read-MngrUtf8Stdin
 if ([string]::IsNullOrWhiteSpace($payload)) {
   exit 0
 }
@@ -91,11 +135,9 @@ try {
   $client = [System.IO.Pipes.NamedPipeClientStream]::new(".", "mngr", [System.IO.Pipes.PipeDirection]::Out)
   $client.Connect(50)
 
-  $writer = [System.IO.StreamWriter]::new($client, [System.Text.UTF8Encoding]::new($false))
-  $writer.NewLine = "`n"
-  $writer.WriteLine($jsonLine)
-  $writer.Flush()
-  $writer.Dispose()
+  $pipeBytes = $Utf8NoBom.GetBytes($jsonLine + "`n")
+  $client.Write($pipeBytes, 0, $pipeBytes.Length)
+  $client.Flush()
   $client.Dispose()
 } catch {
   exit 0
@@ -113,7 +155,11 @@ while ((Get-Date) -lt $deadline) {
   $response = Read-MngrApprovalResponse -Path $responsePath
   if ($null -ne $response) {
     Remove-Item -LiteralPath $responsePath -Force -ErrorAction SilentlyContinue
-    ConvertTo-ClaudePermissionOutput -Decision ([string]$response.decision) -Reason ([string]$response.reason) -UpdatedPermissions $response.updatedPermissions
+    if (Test-MngrQuestionResponse -Response $response) {
+      ConvertTo-ClaudeQuestionOutput -Response $response
+    } else {
+      ConvertTo-ClaudePermissionOutput -Decision ([string]$response.decision) -Reason ([string]$response.reason) -UpdatedPermissions $response.updatedPermissions
+    }
     exit 0
   }
 

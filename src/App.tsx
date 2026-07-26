@@ -308,6 +308,7 @@ function App() {
       current_tool: "Bash",
       permission_mode: "default",
       pending_approval: {
+        kind: "permission",
         request_id: `demo-${session.session_id}-approval`,
         tool_name: "Bash",
         tool_input: { command: "rm -rf node_modules && npm ci" },

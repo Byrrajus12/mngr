@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { useState } from "react";
-import type { PermissionSuggestion, Session } from "../types";
+import type { PermissionSuggestion, QuestionRequest, Session } from "../types";
 
 type SessionCardProps = {
   session: Session;
@@ -39,6 +39,7 @@ function glyph(session: Session) {
 }
 
 function statusClass(session: Session) {
+  if (session.status === "WaitingForApproval" && session.pending_approval?.kind === "question") return "attention-q";
   if (session.status === "WaitingForApproval") return "attention-req";
   if (session.status === "WaitingForInput") return "attention-q";
   if (session.status === "Done" || session.status === "Idle") return "done";
@@ -50,6 +51,7 @@ function shouldFreezeElapsed(session: Session) {
 }
 
 function statusText(session: Session, now: number) {
+  if (session.status === "WaitingForApproval" && session.pending_approval?.kind === "question") return "Waiting for your answer";
   if (session.status === "WaitingForApproval") return "Waiting for permission";
   if (session.status === "WaitingForInput") return "Waiting for your answer";
   if (session.status === "Done") return `Finished - ${elapsed(session.started_at, now, session.last_event_at)}`;
@@ -60,7 +62,7 @@ function statusText(session: Session, now: number) {
 
 function commandText(session: Session) {
   const pending = session.pending_approval;
-  if (!pending) return "command";
+  if (!pending || pending.kind !== "permission") return "command";
   const name = pending.tool_name || "command";
   const input = pending.tool_input;
 
@@ -73,6 +75,21 @@ function commandText(session: Session) {
   }
   if (input == null) return name;
   return `${name} ${String(input)}`;
+}
+
+function demoQuestions(): QuestionRequest["questions"] {
+  return [
+    {
+      question: "Claude Code has a question before continuing.",
+      header: null,
+      multiSelect: false,
+      options: [
+        { label: "Continue", description: "Resume the demo session." },
+        { label: "Explain first", description: "Ask for more context before continuing." },
+        { label: "Stop", description: "Stop this demo path." },
+      ],
+    },
+  ];
 }
 
 function suggestionLabel(suggestion: PermissionSuggestion) {
@@ -105,11 +122,12 @@ function SessionCard({ session, index, now, onDismiss }: SessionCardProps) {
   const [pendingAction, setPendingAction] = useState<string | null>(null);
   const [approvalError, setApprovalError] = useState<string | null>(null);
 
-  const showApproval = session.status === "WaitingForApproval" && !resolved;
-  const showQuestion = session.status === "WaitingForInput" && !resolved;
+  const pendingQuestion = session.pending_approval?.kind === "question" ? session.pending_approval : null;
+  const showApproval = session.status === "WaitingForApproval" && session.pending_approval?.kind !== "question" && !resolved;
+  const showQuestion = ((session.status === "WaitingForApproval" && !!pendingQuestion) || session.status === "WaitingForInput") && !resolved;
 
   async function resolveRealApproval(decision: "allow" | "deny", updatedPermissions?: PermissionSuggestion[]) {
-    const requestId = session.pending_approval?.request_id;
+    const requestId = session.pending_approval?.kind === "permission" ? session.pending_approval.request_id : null;
     if (!requestId) {
       setApprovalError("Missing approval request id");
       return;
@@ -149,6 +167,34 @@ function SessionCard({ session, index, now, onDismiss }: SessionCardProps) {
     }
 
     resolveRealApproval("deny");
+  }
+
+  async function resolveRealQuestion(question: string, answer: string) {
+    const requestId = pendingQuestion?.request_id;
+    if (!requestId) {
+      setApprovalError("Missing question request id");
+      return;
+    }
+
+    setPendingAction(answer);
+    setApprovalError(null);
+    try {
+      await invoke("resolve_question", { requestId, question, answer });
+    } catch (error) {
+      setApprovalError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setPendingAction(null);
+    }
+  }
+
+  function handleQuestionAnswer(question: string, answer: string) {
+    if (isDemo || !pendingQuestion) {
+      console.log("question option", answer, session.session_id);
+      setResolved(`-> ${answer}`);
+      return;
+    }
+
+    resolveRealQuestion(question, answer);
   }
 
   return (
@@ -214,7 +260,7 @@ function SessionCard({ session, index, now, onDismiss }: SessionCardProps) {
             >
               {pendingAction === "allow" ? "Allowing" : "Allow"}
             </button>
-            {(session.pending_approval?.permission_suggestions ?? []).map((suggestion, suggestionIndex) => (
+            {(session.pending_approval?.kind === "permission" ? session.pending_approval.permission_suggestions : []).map((suggestion, suggestionIndex) => (
               <button
                 className="suggestionAllow"
                 type="button"
@@ -240,22 +286,28 @@ function SessionCard({ session, index, now, onDismiss }: SessionCardProps) {
 
       {showQuestion ? (
         <>
-          <div className="qtext">Claude Code has a question before continuing.</div>
-          <div className="pills">
-            {["Continue", "Explain first", "Stop"].map((option) => (
-              <button
-                className="pill"
-                type="button"
-                key={option}
-                onClick={() => {
-                  console.log("question option", option, session.session_id);
-                  setResolved(`-> ${option}`);
-                }}
-              >
-                {option}
-              </button>
-            ))}
-          </div>
+          {/* Question UI is intentionally minimal pending a later design pass. */}
+          {(pendingQuestion?.questions ?? demoQuestions()).map((question) => (
+            <div className="questionBlock" key={question.question}>
+              {question.header ? <div className="qheader">{question.header}</div> : null}
+              <div className="qtext">{question.question}</div>
+              <div className="pills">
+                {question.options.map((option) => (
+                  <button
+                    className="pill"
+                    type="button"
+                    disabled={pendingAction !== null}
+                    key={option.label}
+                    onClick={() => handleQuestionAnswer(question.question, option.label)}
+                  >
+                    <span>{pendingAction === option.label ? "Answering" : option.label}</span>{" "}
+                    <span className="pillDesc">{option.description}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          ))}
+          {approvalError ? <div className="cardError">{approvalError}</div> : null}
         </>
       ) : null}
 

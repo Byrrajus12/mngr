@@ -9,12 +9,33 @@ export type SessionStatus =
 export type PermissionSuggestion = Record<string, unknown>;
 
 export type ApprovalRequest = {
+  kind: "permission";
   request_id: string;
   tool_name: string;
   tool_input: unknown;
   permission_mode?: string | null;
   permission_suggestions: PermissionSuggestion[];
 };
+
+export type QuestionOption = {
+  label: string;
+  description: string;
+};
+
+export type UserQuestion = {
+  question: string;
+  header?: string | null;
+  multiSelect: boolean;
+  options: QuestionOption[];
+};
+
+export type QuestionRequest = {
+  kind: "question";
+  request_id: string;
+  questions: UserQuestion[];
+};
+
+export type PendingRequest = ApprovalRequest | QuestionRequest;
 
 export type Session = {
   session_id: string;
@@ -26,5 +47,5 @@ export type Session = {
   last_event_at: number;
   current_tool?: string | null;
   permission_mode?: string | null;
-  pending_approval?: ApprovalRequest | null;
+  pending_approval?: PendingRequest | null;
 };

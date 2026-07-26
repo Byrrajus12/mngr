@@ -56,6 +56,36 @@ pub struct ApprovalRequest {
     pub transcript_offset: u64,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct QuestionOption {
+    pub label: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct UserQuestion {
+    pub question: String,
+    pub header: Option<String>,
+    #[serde(rename = "multiSelect")]
+    pub multi_select: bool,
+    pub options: Vec<QuestionOption>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct QuestionRequest {
+    pub request_id: String,
+    pub questions: Vec<UserQuestion>,
+    #[serde(skip_serializing)]
+    pub raw_questions: Value,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PendingRequest {
+    Permission(ApprovalRequest),
+    Question(QuestionRequest),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "PascalCase")]
 pub enum SessionStatus {
@@ -78,7 +108,7 @@ pub struct Session {
     pub last_event_at: u64,
     pub current_tool: Option<String>,
     pub permission_mode: Option<String>,
-    pub pending_approval: Option<ApprovalRequest>,
+    pub pending_approval: Option<PendingRequest>,
 }
 
 #[derive(Default)]
@@ -156,22 +186,32 @@ impl SessionManager {
                     .unwrap_or_else(|| "command".to_string());
                 let tool_input = payload.tool_input.clone().unwrap_or(Value::Null);
                 session.permission_mode = payload.permission_mode.clone();
-                session.status = SessionStatus::WaitingForApproval;
                 session.current_tool = Some(tool_name.clone());
                 let transcript_offset = payload
                     .transcript_path
                     .as_deref()
                     .and_then(transcript_end_offset)
                     .unwrap_or(0);
-                session.pending_approval = Some(ApprovalRequest {
-                    request_id: payload.request_id.clone().unwrap_or_default(),
+                let request_id = payload.request_id.clone().unwrap_or_default();
+
+                if tool_name == "AskUserQuestion" {
+                    if let Some(question) = parse_question_request(&payload, &request_id) {
+                        session.status = SessionStatus::WaitingForApproval;
+                        session.pending_approval = Some(PendingRequest::Question(question));
+                        return self.snapshot();
+                    }
+                }
+
+                session.status = SessionStatus::WaitingForApproval;
+                session.pending_approval = Some(PendingRequest::Permission(ApprovalRequest {
+                    request_id,
                     tool_name,
                     tool_input,
                     permission_mode: payload.permission_mode.clone(),
                     permission_suggestions: payload.permission_suggestions.clone(),
                     transcript_path: payload.transcript_path.clone(),
                     transcript_offset,
-                });
+                }));
             }
             "Notification" => {
                 if notification_is_completion(&payload) {
@@ -207,6 +247,38 @@ impl SessionManager {
             let Some(pending) = &session.pending_approval else {
                 continue;
             };
+            let PendingRequest::Permission(pending) = pending else {
+                continue;
+            };
+            if pending.request_id != request_id {
+                continue;
+            }
+
+            session.status = SessionStatus::Working;
+            session.pending_approval = None;
+            break;
+        }
+
+        self.snapshot()
+    }
+
+    fn question_request(&self, request_id: &str) -> Option<QuestionRequest> {
+        self.sessions.values().find_map(|session| {
+            let Some(PendingRequest::Question(pending)) = &session.pending_approval else {
+                return None;
+            };
+            (pending.request_id == request_id).then(|| pending.clone())
+        })
+    }
+
+    fn resolve_question(&mut self, request_id: &str) -> Vec<Session> {
+        for session in self.sessions.values_mut() {
+            let Some(pending) = &session.pending_approval else {
+                continue;
+            };
+            let PendingRequest::Question(pending) = pending else {
+                continue;
+            };
             if pending.request_id != request_id {
                 continue;
             }
@@ -227,7 +299,8 @@ impl SessionManager {
                 continue;
             }
 
-            let Some(pending) = session.pending_approval.as_mut() else {
+            let Some(PendingRequest::Permission(pending)) = session.pending_approval.as_mut()
+            else {
                 continue;
             };
             let Some(transcript_path) = pending.transcript_path.as_deref() else {
@@ -340,6 +413,60 @@ fn notification_is_question(payload: &ClaudeHookPayload) -> bool {
     content.contains("?") || content.contains("question") || content.contains("needs input")
 }
 
+fn parse_question_request(
+    payload: &ClaudeHookPayload,
+    request_id: &str,
+) -> Option<QuestionRequest> {
+    let raw_questions = payload.tool_input.as_ref()?.get("questions")?.clone();
+    let question_values = raw_questions.as_array()?;
+    let mut questions = Vec::new();
+
+    for value in question_values {
+        let question = value.get("question")?.as_str()?.to_string();
+        let header = value
+            .get("header")
+            .and_then(Value::as_str)
+            .map(ToString::to_string);
+        let multi_select = value
+            .get("multiSelect")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if multi_select {
+            return None;
+        }
+
+        let option_values = value.get("options")?.as_array()?;
+        let mut options = Vec::new();
+        for option in option_values {
+            options.push(QuestionOption {
+                label: option.get("label")?.as_str()?.to_string(),
+                description: option
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+            });
+        }
+
+        questions.push(UserQuestion {
+            question,
+            header,
+            multi_select,
+            options,
+        });
+    }
+
+    if questions.is_empty() {
+        return None;
+    }
+
+    Some(QuestionRequest {
+        request_id: request_id.to_string(),
+        questions,
+        raw_questions,
+    })
+}
+
 fn emit_sessions(app: &tauri::AppHandle, sessions: Vec<Session>) {
     if let Err(error) = app.emit("sessions-updated", sessions) {
         eprintln!("failed to emit sessions-updated: {error}");
@@ -391,6 +518,38 @@ fn resolve_approval(
     let sessions = {
         let mut manager = store.0.lock().expect("session manager mutex poisoned");
         manager.resolve_approval(&request_id)
+    };
+    emit_sessions(&app, sessions.clone());
+    Ok(sessions)
+}
+
+#[tauri::command]
+fn resolve_question(
+    app: tauri::AppHandle,
+    store: State<'_, SessionStore>,
+    request_id: String,
+    question: String,
+    answer: String,
+) -> Result<Vec<Session>, String> {
+    let pending_question = {
+        let manager = store.0.lock().expect("session manager mutex poisoned");
+        manager
+            .question_request(&request_id)
+            .ok_or_else(|| "question request not found".to_string())?
+    };
+
+    write_question_response(
+        &responses_dir(),
+        &request_id,
+        &pending_question.raw_questions,
+        &question,
+        &answer,
+    )
+    .map_err(|error| error.to_string())?;
+
+    let sessions = {
+        let mut manager = store.0.lock().expect("session manager mutex poisoned");
+        manager.resolve_question(&request_id)
     };
     emit_sessions(&app, sessions.clone());
     Ok(sessions)
@@ -556,7 +715,32 @@ fn write_approval_response(
         }
     }
 
-    fs::write(&tmp_path, body.to_string())?;
+    fs::write(&tmp_path, body.to_string().as_bytes())?;
+    fs::rename(tmp_path, final_path)
+}
+
+fn write_question_response(
+    responses_dir: &Path,
+    request_id: &str,
+    raw_questions: &Value,
+    question: &str,
+    answer: &str,
+) -> std::io::Result<()> {
+    fs::create_dir_all(responses_dir)?;
+    let final_path = responses_dir.join(format!("{request_id}.json"));
+    let tmp_path = responses_dir.join(format!("{request_id}.json.tmp"));
+    let mut answers = serde_json::Map::new();
+    answers.insert(question.to_string(), Value::String(answer.to_string()));
+    let body = json!({
+        "decision": "allow",
+        "updatedInput": {
+            "questions": raw_questions,
+            "answers": Value::Object(answers),
+            "answer": answer
+        }
+    });
+
+    fs::write(&tmp_path, body.to_string().as_bytes())?;
     fs::rename(tmp_path, final_path)
 }
 
@@ -601,6 +785,7 @@ pub fn run() {
             get_sessions,
             install_claude_hooks,
             resolve_approval,
+            resolve_question,
             expand_panel
         ])
         .run(tauri::generate_context!())
@@ -959,10 +1144,13 @@ mod tests {
 
         assert_eq!(sessions[0].status, SessionStatus::WaitingForApproval);
         assert_eq!(sessions[0].permission_mode.as_deref(), Some("default"));
-        let pending = sessions[0]
+        let PendingRequest::Permission(pending) = sessions[0]
             .pending_approval
             .as_ref()
-            .expect("pending approval");
+            .expect("pending approval")
+        else {
+            panic!("expected permission request");
+        };
         assert_eq!(pending.request_id, "req-2");
         assert_eq!(pending.tool_name, "Bash");
         assert_eq!(pending.permission_mode.as_deref(), Some("default"));
@@ -1001,10 +1189,13 @@ mod tests {
         let sessions = manager.apply_event(permission_request_payload("req-new"));
 
         assert_eq!(sessions[0].status, SessionStatus::WaitingForApproval);
-        let pending = sessions[0]
+        let PendingRequest::Permission(pending) = sessions[0]
             .pending_approval
             .as_ref()
-            .expect("pending approval");
+            .expect("pending approval")
+        else {
+            panic!("expected permission request");
+        };
         assert_eq!(pending.request_id, "req-new");
     }
 
@@ -1036,6 +1227,115 @@ mod tests {
 
         assert!(manager.poll_transcript_denials());
         let sessions = manager.snapshot();
+        assert_eq!(sessions[0].status, SessionStatus::Working);
+        assert!(sessions[0].pending_approval.is_none());
+    }
+
+    fn question_request_payload(request_id: &str) -> ClaudeHookPayload {
+        let question = "Which path \u{2014} should I \u{201c}take\u{201d}?";
+        let description = "Spend more time checking \u{2014} preserving \u{201c}quotes\u{201d}.";
+        let payload = json!({
+            "session_id": "session-1",
+            "hook_event_name": "PermissionRequest",
+            "cwd": "C:\\work\\project",
+            "request_id": request_id,
+            "permission_mode": "default",
+            "tool_name": "AskUserQuestion",
+            "tool_input": {
+                "questions": [
+                    {
+                        "question": question,
+                        "header": "Choose",
+                        "multiSelect": false,
+                        "options": [
+                            { "label": "Fast", "description": "Do the quickest safe thing." },
+                            { "label": "Careful", "description": description }
+                        ]
+                    }
+                ]
+            },
+            "permission_suggestions": []
+        });
+        let payload_bytes = payload.to_string().into_bytes();
+        assert!(payload_bytes
+            .windows(question.as_bytes().len())
+            .any(|window| window == question.as_bytes()));
+        serde_json::from_slice(&payload_bytes).expect("parse payload bytes")
+    }
+
+    #[test]
+    fn ask_user_question_surfaces_options_and_writes_answer_with_original_questions() {
+        let dir = test_dir("question-answer");
+        let mut manager = SessionManager::default();
+
+        let sessions = manager.apply_event(question_request_payload("req-question"));
+
+        assert_eq!(sessions[0].status, SessionStatus::WaitingForApproval);
+        let PendingRequest::Question(pending) = sessions[0]
+            .pending_approval
+            .as_ref()
+            .expect("pending question")
+        else {
+            panic!("expected question request");
+        };
+        assert_eq!(pending.request_id, "req-question");
+        assert_eq!(pending.questions.len(), 1);
+        assert_eq!(
+            pending.questions[0].question,
+            "Which path \u{2014} should I \u{201c}take\u{201d}?"
+        );
+        assert_eq!(
+            pending.questions[0].question.as_bytes(),
+            "Which path \u{2014} should I \u{201c}take\u{201d}?".as_bytes()
+        );
+        assert_eq!(pending.questions[0].header.as_deref(), Some("Choose"));
+        assert!(!pending.questions[0].multi_select);
+        assert_eq!(pending.questions[0].options[0].label, "Fast");
+        assert_eq!(
+            pending.questions[0].options[1].description,
+            "Spend more time checking \u{2014} preserving \u{201c}quotes\u{201d}."
+        );
+
+        write_question_response(
+            &dir,
+            &pending.request_id,
+            &pending.raw_questions,
+            &pending.questions[0].question,
+            "Careful",
+        )
+        .expect("write question response");
+
+        let response_bytes = fs::read(dir.join("req-question.json")).expect("read response bytes");
+        let unicode_bytes =
+            "Spend more time checking \u{2014} preserving \u{201c}quotes\u{201d}.".as_bytes();
+        assert!(response_bytes
+            .windows(unicode_bytes.len())
+            .any(|window| window == unicode_bytes));
+        let value: Value = serde_json::from_slice(&response_bytes).expect("parse response");
+        assert_eq!(value["decision"], "allow");
+        assert_eq!(
+            value["updatedInput"]["answers"]
+                .get("Which path \u{2014} should I \u{201c}take\u{201d}?")
+                .expect("answer by question text"),
+            "Careful"
+        );
+        assert_eq!(value["updatedInput"]["answer"], "Careful");
+        assert_eq!(
+            value["updatedInput"]["questions"],
+            json!([
+                {
+                    "question": "Which path \u{2014} should I \u{201c}take\u{201d}?",
+                    "header": "Choose",
+                    "multiSelect": false,
+                    "options": [
+                        { "label": "Fast", "description": "Do the quickest safe thing." },
+                        { "label": "Careful", "description": "Spend more time checking \u{2014} preserving \u{201c}quotes\u{201d}." }
+                    ]
+                }
+            ])
+        );
+
+        let sessions = manager.resolve_question("req-question");
         assert_eq!(sessions[0].status, SessionStatus::Working);
         assert!(sessions[0].pending_approval.is_none());
     }
