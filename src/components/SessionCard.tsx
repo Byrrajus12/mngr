@@ -121,6 +121,7 @@ function SessionCard({ session, index, now, onDismiss }: SessionCardProps) {
   const [reason, setReason] = useState("");
   const [pendingAction, setPendingAction] = useState<string | null>(null);
   const [approvalError, setApprovalError] = useState<string | null>(null);
+  const [terminalJumpError, setTerminalJumpError] = useState<string | null>(null);
 
   const pendingQuestion = session.pending_approval?.kind === "question" ? session.pending_approval : null;
   const showApproval = session.status === "WaitingForApproval" && session.pending_approval?.kind !== "question" && !resolved;
@@ -149,6 +150,20 @@ function SessionCard({ session, index, now, onDismiss }: SessionCardProps) {
     }
   }
 
+
+  async function handleJumpToTerminal() {
+    if (isDemo) {
+      console.log("jump", session.session_id);
+      return;
+    }
+
+    setTerminalJumpError(null);
+    try {
+      await invoke("jump_to_terminal", { sessionId: session.session_id });
+    } catch (error) {
+      setTerminalJumpError(error instanceof Error ? error.message : String(error));
+    }
+  }
   function handleAllow(updatedPermissions?: PermissionSuggestion[]) {
     if (isDemo) {
       console.log("mngr allow clicked", session.session_id, updatedPermissions);
@@ -231,7 +246,7 @@ function SessionCard({ session, index, now, onDismiss }: SessionCardProps) {
           aria-label="Jump to terminal"
           onClick={(event) => {
             event.stopPropagation();
-            console.log("jump", session.session_id);
+            handleJumpToTerminal();
           }}
         >
           <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M3 9L9 3M4.5 3H9v4.5" stroke="currentColor" strokeWidth="1.3" fill="none" strokeLinecap="round" strokeLinejoin="round" /></svg>
@@ -310,6 +325,8 @@ function SessionCard({ session, index, now, onDismiss }: SessionCardProps) {
           {approvalError ? <div className="cardError">{approvalError}</div> : null}
         </>
       ) : null}
+
+      {terminalJumpError ? <div className="cardError">{terminalJumpError}</div> : null}
 
       {resolved ? <div className="cardResolved">{resolved}</div> : null}
 

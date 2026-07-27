@@ -13,6 +13,8 @@ function ConvertTo-MngrHookPayload {
     $requestId = [guid]::NewGuid().ToString()
     $hook | Add-Member -NotePropertyName "request_id" -NotePropertyValue $requestId -Force
   }
+  $hook | Add-Member -NotePropertyName "wt_session" -NotePropertyValue ([string]$env:WT_SESSION) -Force
+  $hook | Add-Member -NotePropertyName "hook_pid" -NotePropertyValue $PID -Force
 
   return $hook
 }

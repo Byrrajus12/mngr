@@ -43,6 +43,9 @@ export type Session = {
   status: SessionStatus;
   project_path: string;
   project_name: string;
+  wt_session?: string | null;
+  hook_pid?: number | null;
+  terminal_window_hwnd?: number | null;
   started_at: number;
   last_event_at: number;
   current_tool?: string | null;
