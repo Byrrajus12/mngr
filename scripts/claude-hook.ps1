@@ -16,6 +16,20 @@ function ConvertTo-MngrHookPayload {
   $hook | Add-Member -NotePropertyName "wt_session" -NotePropertyValue ([string]$env:WT_SESSION) -Force
   $hook | Add-Member -NotePropertyName "hook_pid" -NotePropertyValue $PID -Force
 
+  $walkPid = $PID
+  $shellPid = $null
+  while ($walkPid -and $walkPid -gt 0) {
+    $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$walkPid" -ErrorAction SilentlyContinue
+    if (-not $proc) { break }
+    $parentProc = Get-CimInstance Win32_Process -Filter "ProcessId=$($proc.ParentProcessId)" -ErrorAction SilentlyContinue
+    if ($parentProc -and $parentProc.Name -eq 'WindowsTerminal.exe') {
+      $shellPid = $walkPid
+      break
+    }
+    $walkPid = $proc.ParentProcessId
+  }
+  $hook | Add-Member -NotePropertyName "shell_pid" -NotePropertyValue $shellPid -Force
+
   return $hook
 }
 
@@ -113,7 +127,7 @@ if ([string]::IsNullOrWhiteSpace($payload)) {
 }
 
 try {
-  $mngrPayload = ConvertTo-MngrHookPayload -PayloadText $payload.Trim()
+  $mngrPayload = ConvertTo-MngrHookPayload -PayloadText $payload.Trim().TrimStart([char]0xFEFF)
 } catch {
   exit 0
 }

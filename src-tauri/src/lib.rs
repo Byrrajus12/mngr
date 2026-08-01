@@ -37,6 +37,8 @@ pub struct ClaudeHookPayload {
     #[serde(default)]
     pub hook_pid: Option<u32>,
     #[serde(default)]
+    pub shell_pid: Option<u32>,
+    #[serde(default)]
     pub request_id: Option<String>,
     #[serde(default)]
     pub permission_mode: Option<String>,
@@ -115,7 +117,7 @@ pub struct Session {
     pub project_name: String,
     pub wt_session: Option<String>,
     pub hook_pid: Option<u32>,
-    pub terminal_window_hwnd: Option<isize>,
+    pub shell_pid: Option<u32>,
     pub started_at: u64,
     pub last_event_at: u64,
     pub current_tool: Option<String>,
@@ -178,10 +180,12 @@ impl SessionManager {
         session.project_name = project_name(&payload.cwd);
         if payload.wt_session.is_some() && session.wt_session != payload.wt_session {
             session.wt_session = payload.wt_session.clone();
-            session.terminal_window_hwnd = None;
         }
         if payload.hook_pid.is_some() {
             session.hook_pid = payload.hook_pid;
+        }
+        if payload.shell_pid.is_some() {
+            session.shell_pid = payload.shell_pid;
         }
         session.last_event_at = now;
 
@@ -407,7 +411,7 @@ impl Session {
             project_name: project_name(&payload.cwd),
             wt_session: payload.wt_session.clone(),
             hook_pid: payload.hook_pid,
-            terminal_window_hwnd: None,
+            shell_pid: payload.shell_pid,
             started_at: now,
             last_event_at: now,
             current_tool: None,
@@ -512,131 +516,146 @@ fn parse_question_request(
     })
 }
 
-fn choose_terminal_hwnd(hwnds: &[isize]) -> Result<isize, String> {
-    match hwnds {
-        [] => Err("No Windows Terminal window found -- this session may be running in a different terminal".to_string()),
-        [hwnd] => Ok(*hwnd),
-        [hwnd, ..] => Ok(*hwnd),
+#[cfg(windows)]
+fn allow_foreground_window_change() {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        SendInput, INPUT, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
+    };
+
+    unsafe {
+        let mut inputs: [INPUT; 2] = std::mem::zeroed();
+        inputs[0].r#type = INPUT_KEYBOARD;
+        inputs[0].Anonymous.ki = KEYBDINPUT {
+            wVk: 0,
+            wScan: 0,
+            dwFlags: 0,
+            time: 0,
+            dwExtraInfo: 0,
+        };
+        inputs[1].r#type = INPUT_KEYBOARD;
+        inputs[1].Anonymous.ki = KEYBDINPUT {
+            wVk: 0,
+            wScan: 0,
+            dwFlags: KEYEVENTF_KEYUP,
+            time: 0,
+            dwExtraInfo: 0,
+        };
+        SendInput(2, inputs.as_ptr(), std::mem::size_of::<INPUT>() as i32);
     }
 }
 
 #[cfg(windows)]
-fn resolve_terminal_hwnd() -> Result<isize, String> {
-    choose_terminal_hwnd(&windows_terminal_hwnds()?)
-}
-
-#[cfg(not(windows))]
-fn resolve_terminal_hwnd() -> Result<isize, String> {
-    Err("jump to terminal is only available on Windows".to_string())
+fn to_wide(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
 #[cfg(windows)]
-fn windows_terminal_process_ids() -> Result<Vec<u32>, String> {
-    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
-    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
-        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
-        TH32CS_SNAPPROCESS,
+fn find_windows_by_class(class_name: &str) -> Vec<isize> {
+    use windows_sys::Win32::Foundation::HWND;
+    use windows_sys::Win32::UI::WindowsAndMessaging::FindWindowExW;
+
+    let class_wide = to_wide(class_name);
+    let mut hwnds = Vec::new();
+    let mut hwnd: HWND = std::ptr::null_mut();
+    loop {
+        hwnd = unsafe {
+            FindWindowExW(
+                std::ptr::null_mut(),
+                hwnd,
+                class_wide.as_ptr(),
+                std::ptr::null(),
+            )
+        };
+        if hwnd.is_null() {
+            break;
+        }
+        hwnds.push(hwnd as isize);
+    }
+    hwnds
+}
+
+#[cfg(windows)]
+fn select_windows_terminal_tab(marker_tag: &str, shell_pid: u32) -> Result<isize, String> {
+    use uiautomation::actions::SelectionItem;
+    use uiautomation::controls::{ControlType, TabItemControl};
+    use uiautomation::types::Handle;
+    use uiautomation::UIAutomation;
+    use windows::Win32::Foundation::HWND as UiaHwnd;
+    use windows_sys::Win32::Foundation::GetLastError;
+    use windows_sys::Win32::System::Console::{
+        AttachConsole, FreeConsole, GetConsoleTitleW, SetConsoleTitleW,
     };
 
-    unsafe {
-        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-        if snapshot == INVALID_HANDLE_VALUE {
-            return Err("could not enumerate processes".to_string());
-        }
+    const ATTACH_PARENT_PROCESS: u32 = 0xFFFF_FFFF;
 
-        let mut entry = PROCESSENTRY32W {
-            dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
-            ..std::mem::zeroed()
-        };
-        let mut pids = Vec::new();
-        if Process32FirstW(snapshot, &mut entry) != 0 {
-            loop {
-                let len = entry
-                    .szExeFile
-                    .iter()
-                    .position(|ch| *ch == 0)
-                    .unwrap_or(entry.szExeFile.len());
-                let name = String::from_utf16_lossy(&entry.szExeFile[..len]);
-                if name.eq_ignore_ascii_case("WindowsTerminal.exe") {
-                    pids.push(entry.th32ProcessID);
-                }
-                if Process32NextW(snapshot, &mut entry) == 0 {
-                    break;
-                }
+    unsafe {
+        FreeConsole();
+        if AttachConsole(shell_pid) == 0 {
+            let error = GetLastError();
+            AttachConsole(ATTACH_PARENT_PROCESS);
+            return Err(format!("AttachConsole failed: {error}"));
+        }
+    }
+
+    let mut buffer = vec![0u16; 1024];
+    let len = unsafe { GetConsoleTitleW(buffer.as_mut_ptr(), buffer.len() as u32) };
+    let original_title = String::from_utf16_lossy(&buffer[..len as usize]);
+
+    let result = (|| {
+        let marker = to_wide(marker_tag);
+        unsafe {
+            if SetConsoleTitleW(marker.as_ptr()) == 0 {
+                return Err(format!("SetConsoleTitleW failed: {}", GetLastError()));
             }
         }
-        CloseHandle(snapshot);
-        Ok(pids)
-    }
-}
 
-#[cfg(windows)]
-fn windows_terminal_hwnds() -> Result<Vec<isize>, String> {
-    use std::collections::HashSet;
-    use windows_sys::Win32::Foundation::{BOOL, HWND, LPARAM};
-    use windows_sys::Win32::UI::WindowsAndMessaging::{
-        EnumWindows, GetWindowThreadProcessId, IsWindowVisible,
-    };
+        let automation = UIAutomation::new().map_err(|error| error.to_string())?;
+        let wt_hwnds = find_windows_by_class("CASCADIA_HOSTING_WINDOW_CLASS");
+        for wt_hwnd in wt_hwnds {
+            let window = automation
+                .element_from_handle(Handle::from(UiaHwnd(wt_hwnd)))
+                .map_err(|error| error.to_string())?;
+            let tabs = automation
+                .create_matcher()
+                .from(window)
+                .control_type(ControlType::TabItem)
+                .find_all()
+                .map_err(|error| error.to_string())?;
+            for tab in tabs {
+                let name = tab.get_name().map_err(|error| error.to_string())?;
+                if !name.contains(marker_tag) {
+                    continue;
+                }
 
-    struct Search {
-        pids: HashSet<u32>,
-        hwnds: Vec<isize>,
-    }
-
-    unsafe extern "system" fn enum_window(hwnd: HWND, lparam: LPARAM) -> BOOL {
-        let search = &mut *(lparam as *mut Search);
-        let mut window_pid = 0;
-        GetWindowThreadProcessId(hwnd, &mut window_pid);
-        if search.pids.contains(&window_pid) && IsWindowVisible(hwnd) != 0 {
-            search.hwnds.push(hwnd as isize);
+                let tab_item = TabItemControl::try_from(tab).map_err(|error| error.to_string())?;
+                tab_item.select().map_err(|error| error.to_string())?;
+                return Ok(wt_hwnd);
+            }
         }
-        1
-    }
 
-    let mut search = Search {
-        pids: windows_terminal_process_ids()?.into_iter().collect(),
-        hwnds: Vec::new(),
+        Err(format!(
+            "No Windows Terminal tab found for marker {marker_tag}"
+        ))
+    })();
+
+    let restore_title = to_wide(&original_title);
+    let restore_result = unsafe {
+        if SetConsoleTitleW(restore_title.as_ptr()) == 0 {
+            Err(format!("SetConsoleTitleW failed: {}", GetLastError()))
+        } else {
+            Ok(())
+        }
     };
     unsafe {
-        EnumWindows(Some(enum_window), &mut search as *mut Search as LPARAM);
-    }
-    Ok(search.hwnds)
-}
-#[cfg(windows)]
-fn terminal_window_exists(hwnd: isize) -> bool {
-    use windows_sys::Win32::UI::WindowsAndMessaging::IsWindow;
-    hwnd != 0 && unsafe { IsWindow(hwnd as _) != 0 }
-}
-
-#[cfg(not(windows))]
-fn terminal_window_exists(_hwnd: isize) -> bool {
-    false
-}
-
-#[cfg(windows)]
-fn focus_terminal_window(hwnd: isize) -> Result<(), String> {
-    use windows_sys::Win32::UI::WindowsAndMessaging::{
-        IsIconic, SetForegroundWindow, ShowWindowAsync, SW_RESTORE,
-    };
-
-    if !terminal_window_exists(hwnd) {
-        return Err("terminal window no longer exists".to_string());
+        FreeConsole();
+        AttachConsole(ATTACH_PARENT_PROCESS);
     }
 
-    unsafe {
-        if IsIconic(hwnd as _) != 0 {
-            ShowWindowAsync(hwnd as _, SW_RESTORE);
-        }
-        if SetForegroundWindow(hwnd as _) == 0 {
-            return Err("failed to focus terminal window".to_string());
-        }
+    match (result, restore_result) {
+        (Ok(hwnd), Ok(())) => Ok(hwnd),
+        (Ok(_), Err(error)) => Err(error),
+        (Err(error), _) => Err(error),
     }
-    Ok(())
-}
-
-#[cfg(not(windows))]
-fn focus_terminal_window(_hwnd: isize) -> Result<(), String> {
-    Err("jump to terminal is only available on Windows".to_string())
 }
 fn emit_sessions(app: &tauri::AppHandle, sessions: Vec<Session>) {
     if let Err(error) = app.emit("sessions-updated", sessions) {
@@ -659,28 +678,57 @@ fn get_sessions(store: State<'_, SessionStore>) -> Vec<Session> {
     manager.snapshot()
 }
 
+#[cfg(windows)]
 #[tauri::command]
 fn jump_to_terminal(store: State<'_, SessionStore>, session_id: String) -> Result<(), String> {
-    let hwnd = {
-        let mut manager = store.0.lock().expect("session manager mutex poisoned");
+    let (wt_session, shell_pid) = {
+        let manager = store.0.lock().expect("session manager mutex poisoned");
         let session = manager
             .sessions
-            .get_mut(&session_id)
+            .get(&session_id)
             .ok_or_else(|| "session not found".to_string())?;
-
-        if let Some(hwnd) = session
-            .terminal_window_hwnd
-            .filter(|hwnd| terminal_window_exists(*hwnd))
-        {
-            hwnd
-        } else {
-            let hwnd = resolve_terminal_hwnd()?;
-            session.terminal_window_hwnd = Some(hwnd);
-            hwnd
-        }
+        let wt_session = session
+            .wt_session
+            .clone()
+            .ok_or_else(|| "session has no Windows Terminal identity".to_string())?;
+        let shell_pid = session
+            .shell_pid
+            .ok_or_else(|| "session has no shell process identity".to_string())?;
+        (wt_session, shell_pid)
     };
 
-    focus_terminal_window(hwnd)
+    if wt_session.len() < 8 {
+        return Err("session Windows Terminal identity is too short".to_string());
+    }
+
+    println!("mngr jump: session_id={session_id} shell_pid={shell_pid:?} wt_session={wt_session}");
+
+    let marker_tag = format!("mngr:{}", &wt_session[..8]);
+    let hwnd = std::thread::spawn(move || select_windows_terminal_tab(&marker_tag, shell_pid))
+        .join()
+        .map_err(|_| "failed to scan Windows Terminal tabs".to_string())??;
+
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        IsIconic, SetForegroundWindow, ShowWindowAsync, SW_RESTORE,
+    };
+    unsafe {
+        if IsIconic(hwnd as _) != 0 {
+            ShowWindowAsync(hwnd as _, SW_RESTORE);
+        }
+        if SetForegroundWindow(hwnd as _) == 0 {
+            allow_foreground_window_change();
+            if SetForegroundWindow(hwnd as _) == 0 {
+                return Err("failed to focus terminal window".to_string());
+            }
+        }
+    }
+
+    Ok(())
+}
+#[cfg(not(windows))]
+#[tauri::command]
+fn jump_to_terminal(_store: State<'_, SessionStore>, _session_id: String) -> Result<(), String> {
+    Err("jump to terminal is only available on Windows".to_string())
 }
 
 #[tauri::command]
@@ -1430,6 +1478,7 @@ mod tests {
             cwd: "C:\\work\\project".to_string(),
             wt_session: Some("wt-session-1".to_string()),
             hook_pid: Some(4242),
+            shell_pid: Some(5151),
             request_id: Some(request_id.to_string()),
             permission_mode: None,
             tool_name: Some("Bash".to_string()),
@@ -1448,6 +1497,7 @@ mod tests {
             cwd: "C:\\work\\project".to_string(),
             wt_session: Some("wt-session-1".to_string()),
             hook_pid: Some(4242),
+            shell_pid: Some(5151),
             request_id: Some(request_id.to_string()),
             permission_mode: Some("default".to_string()),
             tool_name: Some("Bash".to_string()),
@@ -1477,6 +1527,7 @@ mod tests {
             cwd: "C:\\work\\project".to_string(),
             wt_session: Some("wt-session-1".to_string()),
             hook_pid: Some(4242),
+            shell_pid: Some(5151),
             request_id: None,
             permission_mode: None,
             tool_name: None,
@@ -1489,30 +1540,6 @@ mod tests {
     }
 
     #[test]
-    fn terminal_window_selection_uses_single_window() {
-        let hwnd = choose_terminal_hwnd(&[111]);
-
-        assert_eq!(hwnd, Ok(111));
-    }
-
-    #[test]
-    fn terminal_window_selection_uses_first_window_when_multiple_exist() {
-        let hwnd = choose_terminal_hwnd(&[222, 111]);
-
-        assert_eq!(hwnd, Ok(222));
-    }
-
-    #[test]
-    fn terminal_window_selection_fails_when_no_windows_exist() {
-        let error = choose_terminal_hwnd(&[]).expect_err("expected no window failure");
-
-        assert_eq!(
-            error,
-            "No Windows Terminal window found -- this session may be running in a different terminal"
-        );
-    }
-
-    #[test]
     fn session_stores_terminal_identity_from_hook_payload() {
         let mut manager = SessionManager::default();
 
@@ -1520,7 +1547,7 @@ mod tests {
 
         assert_eq!(sessions[0].wt_session.as_deref(), Some("wt-session-1"));
         assert_eq!(sessions[0].hook_pid, Some(4242));
-        assert_eq!(sessions[0].terminal_window_hwnd, None);
+        assert_eq!(sessions[0].shell_pid, Some(5151));
     }
     #[test]
     fn pre_tool_use_updates_current_tool_without_approval() {
