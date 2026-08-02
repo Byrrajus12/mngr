@@ -683,6 +683,151 @@ fn select_windows_terminal_tab(marker_tag: &str, shell_pid: u32) -> Result<isize
         (Err(error), _) => Err(error),
     }
 }
+#[cfg(windows)]
+struct ProcessInfo {
+    pid: u32,
+    parent_pid: u32,
+    exe_name: String,
+}
+
+#[cfg(windows)]
+fn process_snapshot() -> Result<Vec<ProcessInfo>, String> {
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
+    };
+
+    unsafe {
+        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snapshot == INVALID_HANDLE_VALUE {
+            return Err("CreateToolhelp32Snapshot failed".to_string());
+        }
+
+        let mut entries = Vec::new();
+        let mut entry: PROCESSENTRY32W = std::mem::zeroed();
+        entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+
+        if Process32FirstW(snapshot, &mut entry) == 0 {
+            CloseHandle(snapshot);
+            return Err("Process32FirstW failed".to_string());
+        }
+
+        loop {
+            let exe_len = entry
+                .szExeFile
+                .iter()
+                .position(|ch| *ch == 0)
+                .unwrap_or(entry.szExeFile.len());
+            entries.push(ProcessInfo {
+                pid: entry.th32ProcessID,
+                parent_pid: entry.th32ParentProcessID,
+                exe_name: String::from_utf16_lossy(&entry.szExeFile[..exe_len]),
+            });
+
+            if Process32NextW(snapshot, &mut entry) == 0 {
+                break;
+            }
+        }
+
+        CloseHandle(snapshot);
+        Ok(entries)
+    }
+}
+
+#[cfg(windows)]
+fn is_non_host_process(exe_name: &str) -> bool {
+    matches!(
+        exe_name.to_ascii_lowercase().as_str(),
+        "services.exe" | "svchost.exe" | "csrss.exe" | "wininit.exe"
+    )
+}
+
+#[cfg(windows)]
+unsafe extern "system" fn find_visible_window_for_pid(
+    hwnd: windows_sys::Win32::Foundation::HWND,
+    lparam: isize,
+) -> i32 {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetClassNameW, GetWindowThreadProcessId, IsWindowVisible,
+    };
+
+    let state = &mut *(lparam as *mut (u32, isize));
+    let mut window_pid = 0;
+    GetWindowThreadProcessId(hwnd, &mut window_pid);
+    if window_pid == state.0 && IsWindowVisible(hwnd) != 0 {
+        let mut class_buf = [0u16; 64];
+        let len = GetClassNameW(hwnd, class_buf.as_mut_ptr(), 64);
+        let class_name = String::from_utf16_lossy(&class_buf[..len as usize]);
+        if class_name == "PseudoConsoleWindow" {
+            return 1;
+        }
+        state.1 = hwnd as isize;
+        return 0;
+    }
+    1
+}
+
+#[cfg(windows)]
+fn visible_window_for_pid(pid: u32) -> Option<isize> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::EnumWindows;
+
+    let mut state = (pid, 0isize);
+    unsafe {
+        EnumWindows(
+            Some(find_visible_window_for_pid),
+            &mut state as *mut (u32, isize) as isize,
+        );
+    }
+    (state.1 != 0).then_some(state.1)
+}
+
+#[cfg(windows)]
+fn focus_window(hwnd: isize) -> Result<(), String> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetAncestor, SetForegroundWindow, ShowWindowAsync, GA_ROOT, SW_RESTORE,
+    };
+
+    unsafe {
+        let root = GetAncestor(hwnd as _, GA_ROOT);
+        let target = if root.is_null() { hwnd } else { root as isize };
+        ShowWindowAsync(target as _, SW_RESTORE);
+        allow_foreground_window_change();
+        if SetForegroundWindow(target as _) == 0 {
+            if SetForegroundWindow(target as _) == 0 {
+                return Err("failed to focus terminal window".to_string());
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(windows)]
+fn fallback_focus_window(shell_pid: u32) -> Result<(), String> {
+    let processes = process_snapshot()?;
+    let mut pid = shell_pid;
+
+    for _ in 0..10 {
+        let Some(process) = processes.iter().find(|process| process.pid == pid) else {
+            break;
+        };
+        if is_non_host_process(&process.exe_name) {
+            break;
+        }
+        if let Some(hwnd) = visible_window_for_pid(process.pid) {
+            return focus_window(hwnd);
+        }
+        if process.parent_pid == 0 || process.parent_pid == process.pid {
+            break;
+        }
+        pid = process.parent_pid;
+    }
+
+    Err(format!(
+        "no visible terminal host window found for shell process {shell_pid}"
+    ))
+}
 fn emit_sessions(app: &tauri::AppHandle, sessions: Vec<Session>) {
     if let Err(error) = app.emit("sessions-updated", sessions) {
         eprintln!("failed to emit sessions-updated: {error}");
@@ -713,43 +858,25 @@ fn jump_to_terminal(store: State<'_, SessionStore>, session_id: String) -> Resul
             .sessions
             .get(&session_id)
             .ok_or_else(|| "session not found".to_string())?;
-        let wt_session = session
-            .wt_session
-            .clone()
-            .ok_or_else(|| "session has no Windows Terminal identity".to_string())?;
         let shell_pid = session
             .shell_pid
-            .ok_or_else(|| "session has no shell process identity".to_string())?;
-        (wt_session, shell_pid)
+            .or(session.hook_pid)
+            .ok_or_else(|| "session has no process identity".to_string())?;
+        (session.wt_session.clone(), shell_pid)
     };
 
-    if wt_session.len() < 8 {
-        return Err("session Windows Terminal identity is too short".to_string());
-    }
+    let marker_tag = wt_session
+        .filter(|s| s.len() >= 8)
+        .map(|s| format!("mngr:{}", &s[..8]))
+        .unwrap_or_else(|| format!("mngr:{shell_pid:08x}"));
 
-    println!("mngr jump: session_id={session_id} shell_pid={shell_pid:?} wt_session={wt_session}");
-
-    let marker_tag = format!("mngr:{}", &wt_session[..8]);
-    let hwnd = std::thread::spawn(move || select_windows_terminal_tab(&marker_tag, shell_pid))
+    match std::thread::spawn(move || select_windows_terminal_tab(&marker_tag, shell_pid))
         .join()
-        .map_err(|_| "failed to scan Windows Terminal tabs".to_string())??;
-
-    use windows_sys::Win32::UI::WindowsAndMessaging::{
-        IsIconic, SetForegroundWindow, ShowWindowAsync, SW_RESTORE,
-    };
-    unsafe {
-        if IsIconic(hwnd as _) != 0 {
-            ShowWindowAsync(hwnd as _, SW_RESTORE);
-        }
-        if SetForegroundWindow(hwnd as _) == 0 {
-            allow_foreground_window_change();
-            if SetForegroundWindow(hwnd as _) == 0 {
-                return Err("failed to focus terminal window".to_string());
-            }
-        }
+        .map_err(|_| "failed to scan Windows Terminal tabs".to_string())
+    {
+        Ok(Ok(hwnd)) => focus_window(hwnd),
+        Ok(Err(_)) | Err(_) => fallback_focus_window(shell_pid),
     }
-
-    Ok(())
 }
 #[cfg(not(windows))]
 #[tauri::command]

@@ -16,17 +16,37 @@ function ConvertTo-MngrHookPayload {
   $hook | Add-Member -NotePropertyName "wt_session" -NotePropertyValue ([string]$env:WT_SESSION) -Force
   $hook | Add-Member -NotePropertyName "hook_pid" -NotePropertyValue $PID -Force
 
+  $knownHosts = @('WindowsTerminal.exe', 'Code.exe', 'conhost.exe', 'OpenConsole.exe', 'ConEmuC64.exe', 'ConEmu.exe', 'Hyper.exe', 'Alacritty.exe', 'wezterm-gui.exe', 'cmd.exe')
   $walkPid = $PID
   $shellPid = $null
+  $hookParentPid = $null
   while ($walkPid -and $walkPid -gt 0) {
     $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$walkPid" -ErrorAction SilentlyContinue
     if (-not $proc) { break }
+    if ($walkPid -eq $PID) {
+      $hookParentPid = $proc.ParentProcessId
+    }
     $parentProc = Get-CimInstance Win32_Process -Filter "ProcessId=$($proc.ParentProcessId)" -ErrorAction SilentlyContinue
-    if ($parentProc -and $parentProc.Name -eq 'WindowsTerminal.exe') {
+    if ($parentProc -and $knownHosts -contains $parentProc.Name) {
       $shellPid = $walkPid
       break
     }
     $walkPid = $proc.ParentProcessId
+  }
+  if ($null -eq $shellPid) {
+    $walkPid2 = $PID
+    while ($walkPid2 -and $walkPid2 -gt 0) {
+      $proc2 = Get-CimInstance Win32_Process -Filter "ProcessId=$walkPid2" -ErrorAction SilentlyContinue
+      if (-not $proc2) { break }
+      if ($proc2.Name -eq 'claude.exe') {
+        $shellPid = $proc2.ParentProcessId
+        break
+      }
+      $walkPid2 = $proc2.ParentProcessId
+    }
+  }
+  if ($null -eq $shellPid) {
+    $shellPid = $hookParentPid
   }
   $hook | Add-Member -NotePropertyName "shell_pid" -NotePropertyValue $shellPid -Force
 
