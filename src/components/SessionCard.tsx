@@ -163,23 +163,42 @@ function suggestionLabel(suggestion: PermissionSuggestion) {
   const type = typeof suggestion.type === "string" ? suggestion.type : "permission";
   const destination = typeof suggestion.destination === "string" ? suggestion.destination : "session";
 
-  if (type === "addDirectories" && Array.isArray(suggestion.directories)) {
-    const dirs = suggestion.directories.filter((dir): dir is string => typeof dir === "string");
-    if (dirs.length === 1) return `Allow access to ${dirs[0]} for this ${destination}`;
-    if (dirs.length > 1) return `Allow access to ${dirs.length} directories for this ${destination}`;
+  if (type === "addRules") {
+    if (Array.isArray(suggestion.rules) && suggestion.rules.length > 0) {
+      return `Add ${suggestion.rules.length} rules for this ${destination}`;
+    }
+    return `Add rules for this ${destination}`;
+  }
+
+  if (type === "addDirectories") {
+    if (Array.isArray(suggestion.directories)) {
+      const dirs = suggestion.directories.filter((dir): dir is string => typeof dir === "string");
+      const objectDirCount = suggestion.directories.length - dirs.length;
+      if (dirs.length === 1 && objectDirCount === 0) return `Allow access to ${dirs[0]} for this ${destination}`;
+      if (dirs.length + objectDirCount > 0) return `Allow access to ${dirs.length + objectDirCount} directories for this ${destination}`;
+    }
+    return `Allow access to directories for this ${destination}`;
   }
 
   if (type === "setMode" && typeof suggestion.mode === "string") {
     return `Use ${suggestion.mode} mode for this ${destination}`;
   }
 
+  function formatValue(value: unknown) {
+    if (value && typeof value === "object") {
+      const json = JSON.stringify(value);
+      if (!json) return "";
+      return json.length > 96 ? `${json.slice(0, 95)}...` : json;
+    }
+    return String(value);
+  }
+
   const fields = Object.entries(suggestion)
     .filter(([key]) => key !== "type")
-    .map(([key, value]) => `${key}: ${Array.isArray(value) ? value.join(", ") : String(value)}`)
+    .map(([key, value]) => `${key}: ${formatValue(value)}`)
     .join(", ");
   return fields ? `Apply ${type} (${fields})` : `Apply ${type}`;
 }
-
 function SessionCard({ session, index, now, onDismiss }: SessionCardProps) {
   const cls = statusClass(session);
   const isDone = cls === "done";
@@ -356,8 +375,9 @@ function SessionCard({ session, index, now, onDismiss }: SessionCardProps) {
 
       <div className="r2">{rowLine()}</div>
 
-      {showApproval ? (
-        <div className="tray">
+      <div className={`tray ${showApproval ? "" : "hidden"}`}>
+        {showApproval ? (
+          <>
           <div className="trayhead">
             <span>{toolName(session)}</span>
             {targetText(pendingPermission?.tool_input) ? <span className="path">{targetText(pendingPermission?.tool_input)}</span> : null}
@@ -417,11 +437,13 @@ function SessionCard({ session, index, now, onDismiss }: SessionCardProps) {
             ))}
           </div>
           {approvalError ? <div className="cardError">{approvalError}</div> : null}
-        </div>
-      ) : null}
+          </>
+        ) : null}
+      </div>
 
-      {showQuestion ? (
-        <div className="tray questionTray">
+      <div className={`tray questionTray ${showQuestion ? "" : "hidden"}`}>
+        {showQuestion ? (
+          <>
           {(pendingQuestion?.questions ?? demoQuestions()).map((question) => (
             <div className="questionBlock" key={question.question}>
               <div className="qtext">{question.question}</div>
@@ -459,8 +481,9 @@ function SessionCard({ session, index, now, onDismiss }: SessionCardProps) {
             </div>
           ))}
           {approvalError ? <div className="cardError">{approvalError}</div> : null}
-        </div>
+        </>
       ) : null}
+      </div>
 
       {terminalJumpError ? <div className="cardError terminalError">{terminalJumpError}</div> : null}
 

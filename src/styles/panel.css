@@ -508,13 +508,24 @@
 }
 
 .tray {
+  max-height: 600px;
   margin-top: 10px;
   overflow: hidden;
   border: 1px solid rgba(255, 255, 255, .09);
   border-radius: var(--r-md);
   background: rgba(5, 7, 11, .55);
+  transition: max-height .35s ease-out, opacity .25s ease-out, margin .25s ease-out;
 }
 
+.tray.hidden {
+  max-height: 0;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  border: 0;
+  opacity: 0;
+  pointer-events: none;
+}
 .trayhead {
   display: flex;
   align-items: center;
@@ -847,6 +858,7 @@
   .row,
   .led,
   .jump,
+  .tray,
   .actions button,
   .opt,
   .submitAnswer,

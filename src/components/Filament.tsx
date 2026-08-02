@@ -1,4 +1,6 @@
 import type { CSSProperties } from "react";
+import claudeCodeLogo from "../assets/providers/claudecode.svg";
+import codexLogo from "../assets/providers/codex.svg";
 import type { Session } from "../types";
 
 type FilamentProps = {
@@ -42,20 +44,11 @@ function elapsed(startedAt: number, now: number, lastEventAt?: number) {
 
 function glyph(session: Session) {
   if (session.agent_type === "codex") {
-    return (
-      <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true">
-        <path d="M5 3L1.5 7 5 11M9 3l3.5 4L9 11" stroke="var(--prov-codex)" strokeWidth="1.3" fill="none" strokeLinecap="round" strokeLinejoin="round" />
-      </svg>
-    );
+    return <img src={codexLogo} alt="" width="12" height="12" style={{ display: "block" }} />;
   }
 
-  return (
-    <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true">
-      <path d="M7 1v12M1 7h12M2.8 2.8l8.4 8.4M11.2 2.8l-8.4 8.4" stroke="var(--prov-claude)" strokeWidth="1.15" strokeLinecap="round" />
-    </svg>
-  );
+  return <img src={claudeCodeLogo} alt="" width="12" height="12" style={{ display: "block" }} />;
 }
-
 function phaseFor(sessionId: string) {
   let hash = 0;
   for (const char of sessionId) hash = (hash * 31 + char.charCodeAt(0)) % 400;
