@@ -13,6 +13,7 @@ export type ApprovalRequest = {
   request_id: string;
   tool_name: string;
   tool_input: unknown;
+  computed_diff?: string | null;
   permission_mode?: string | null;
   permission_suggestions: PermissionSuggestion[];
 };

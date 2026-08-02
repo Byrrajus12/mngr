@@ -99,7 +99,8 @@ type DiffLine = {
   number: number | null;
 };
 
-function diffText(input: unknown) {
+function diffText(input: unknown, computedDiff?: string | null) {
+  if (computedDiff?.trim()) return computedDiff;
   if (!input || typeof input !== "object") return null;
   const obj = input as Record<string, unknown>;
   for (const field of ["diff", "patch", "edit_diff"]) {
@@ -108,8 +109,8 @@ function diffText(input: unknown) {
   return null;
 }
 
-function parseDiff(input: unknown) {
-  const text = diffText(input);
+function parseDiff(input: unknown, computedDiff?: string | null) {
+  const text = diffText(input, computedDiff);
   if (!text) return null;
 
   let nextLine = 1;
@@ -195,7 +196,7 @@ function SessionCard({ session, index, now, onDismiss }: SessionCardProps) {
   const pendingPermission = session.pending_approval?.kind === "permission" ? session.pending_approval : null;
   const showApproval = session.status === "WaitingForApproval" && session.pending_approval?.kind !== "question" && !resolved;
   const showQuestion = ((session.status === "WaitingForApproval" && !!pendingQuestion) || session.status === "WaitingForInput") && !resolved;
-  const parsedDiff = pendingPermission ? parseDiff(pendingPermission.tool_input) : null;
+  const parsedDiff = pendingPermission ? parseDiff(pendingPermission.tool_input, pendingPermission.computed_diff) : null;
 
   function beginResolveAnimation() {
     setResolving(true);

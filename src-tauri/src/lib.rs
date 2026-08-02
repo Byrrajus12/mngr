@@ -1,9 +1,10 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use similar::TextDiff;
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{ErrorKind, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -61,6 +62,7 @@ pub struct ApprovalRequest {
     pub request_id: String,
     pub tool_name: String,
     pub tool_input: Value,
+    pub computed_diff: Option<String>,
     pub permission_mode: Option<String>,
     pub permission_suggestions: Vec<Value>,
     pub transcript_path: Option<String>,
@@ -231,6 +233,7 @@ impl SessionManager {
                     .clone()
                     .unwrap_or_else(|| "command".to_string());
                 let tool_input = payload.tool_input.clone().unwrap_or(Value::Null);
+                let computed_diff = computed_write_diff(&tool_name, &tool_input);
                 session.permission_mode = payload.permission_mode.clone();
                 session.current_tool = Some(tool_name.clone());
                 let transcript_offset = payload
@@ -253,6 +256,7 @@ impl SessionManager {
                     request_id,
                     tool_name,
                     tool_input,
+                    computed_diff,
                     permission_mode: payload.permission_mode.clone(),
                     permission_suggestions: payload.permission_suggestions.clone(),
                     transcript_path: payload.transcript_path.clone(),
@@ -460,6 +464,28 @@ fn notification_is_completion(payload: &ClaudeHookPayload) -> bool {
 fn notification_is_question(payload: &ClaudeHookPayload) -> bool {
     let content = notification_text(payload);
     content.contains("?") || content.contains("question") || content.contains("needs input")
+}
+
+fn computed_write_diff(tool_name: &str, tool_input: &Value) -> Option<String> {
+    if tool_name != "Write" {
+        return None;
+    }
+
+    let obj = tool_input.as_object()?;
+    let file_path = obj.get("file_path")?.as_str()?;
+    let content = obj.get("content")?.as_str()?;
+    let old_content = match fs::read_to_string(file_path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == ErrorKind::NotFound => String::new(),
+        Err(_) => return None,
+    };
+
+    Some(
+        TextDiff::from_lines(old_content.as_str(), content)
+            .unified_diff()
+            .header(file_path, file_path)
+            .to_string(),
+    )
 }
 
 fn parse_question_request(
@@ -1577,10 +1603,68 @@ mod tests {
         };
         assert_eq!(pending.request_id, "req-2");
         assert_eq!(pending.tool_name, "Bash");
+        assert!(pending.computed_diff.is_none());
         assert_eq!(pending.permission_mode.as_deref(), Some("default"));
         assert_eq!(pending.permission_suggestions.len(), 2);
         assert_eq!(pending.permission_suggestions[0]["type"], "addDirectories");
         assert_eq!(pending.permission_suggestions[1]["mode"], "acceptEdits");
+    }
+
+    #[test]
+    fn write_permission_request_includes_computed_diff_for_existing_file() {
+        let dir = test_dir("write-diff-existing");
+        let file_path = dir.join("test-diff.txt");
+        fs::write(&file_path, "hello world\n").expect("write old content");
+
+        let mut payload = permission_request_payload("req-write-diff");
+        payload.tool_name = Some("Write".to_string());
+        payload.tool_input = Some(json!({
+            "file_path": file_path.display().to_string(),
+            "content": "goodbye world\n"
+        }));
+        let mut manager = SessionManager::default();
+
+        let sessions = manager.apply_event(payload);
+
+        let PendingRequest::Permission(pending) = sessions[0]
+            .pending_approval
+            .as_ref()
+            .expect("pending approval")
+        else {
+            panic!("expected permission request");
+        };
+        let diff = pending.computed_diff.as_deref().expect("computed diff");
+        assert!(diff.contains("--- "));
+        assert!(diff.contains("+++ "));
+        assert!(diff.contains("-hello world"));
+        assert!(diff.contains("+goodbye world"));
+    }
+
+    #[test]
+    fn write_permission_request_includes_computed_diff_for_new_file() {
+        let dir = test_dir("write-diff-new");
+        let file_path = dir.join("new-file.txt");
+
+        let mut payload = permission_request_payload("req-write-new-diff");
+        payload.tool_name = Some("Write".to_string());
+        payload.tool_input = Some(json!({
+            "file_path": file_path.display().to_string(),
+            "content": "first line\nsecond line\n"
+        }));
+        let mut manager = SessionManager::default();
+
+        let sessions = manager.apply_event(payload);
+
+        let PendingRequest::Permission(pending) = sessions[0]
+            .pending_approval
+            .as_ref()
+            .expect("pending approval")
+        else {
+            panic!("expected permission request");
+        };
+        let diff = pending.computed_diff.as_deref().expect("computed diff");
+        assert!(diff.contains("+first line"));
+        assert!(diff.contains("+second line"));
     }
 
     #[test]
