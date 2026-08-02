@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import claudeCodeLogo from "../assets/providers/claudecode.svg";
 import codexLogo from "../assets/providers/codex.svg";
 import type { PermissionSuggestion, QuestionRequest, Session } from "../types";
@@ -56,8 +56,7 @@ function statusText(session: Session, now: number) {
   return "Working";
 }
 
-function commandText(session: Session) {
-  const pending = session.pending_approval;
+function commandText(pending: Session["pending_approval"]) {
   if (!pending || pending.kind !== "permission") return "command";
   const name = pending.tool_name || "command";
   const input = pending.tool_input;
@@ -79,8 +78,9 @@ function providerName(session: Session) {
   return session.agent_type;
 }
 
-function toolName(session: Session) {
-  if (session.pending_approval?.kind === "permission") return session.pending_approval.tool_name || "command";
+function toolName(session: Session, pendingOverride?: Session["pending_approval"]) {
+  const pending = pendingOverride === undefined ? session.pending_approval : pendingOverride;
+  if (pending?.kind === "permission") return pending.tool_name || "command";
   return session.current_tool || "Working";
 }
 
@@ -216,7 +216,61 @@ function SessionCard({ session, index, now, onDismiss }: SessionCardProps) {
   const pendingPermission = session.pending_approval?.kind === "permission" ? session.pending_approval : null;
   const showApproval = session.status === "WaitingForApproval" && session.pending_approval?.kind !== "question" && !resolved;
   const showQuestion = ((session.status === "WaitingForApproval" && !!pendingQuestion) || session.status === "WaitingForInput") && !resolved;
-  const parsedDiff = pendingPermission ? parseDiff(pendingPermission.tool_input, pendingPermission.computed_diff) : null;
+  const [approvalTrayMounted, setApprovalTrayMounted] = useState(showApproval);
+  const [questionTrayMounted, setQuestionTrayMounted] = useState(showQuestion);
+  const [approvalTrayOpen, setApprovalTrayOpen] = useState(showApproval);
+  const [questionTrayOpen, setQuestionTrayOpen] = useState(showQuestion);
+  const [approvalSnapshot, setApprovalSnapshot] = useState(pendingPermission);
+  const [questionSnapshot, setQuestionSnapshot] = useState(pendingQuestion);
+  const wasApprovalShown = useRef(showApproval);
+  const wasQuestionShown = useRef(showQuestion);
+  const activePermission = showApproval ? pendingPermission : approvalSnapshot;
+  const activeQuestion = showQuestion ? pendingQuestion : questionSnapshot;
+  const parsedDiff = activePermission ? parseDiff(activePermission.tool_input, activePermission.computed_diff) : null;
+
+  useEffect(() => {
+    if (showApproval && pendingPermission) setApprovalSnapshot(pendingPermission);
+  }, [showApproval, pendingPermission]);
+
+  useEffect(() => {
+    if (showQuestion && pendingQuestion) setQuestionSnapshot(pendingQuestion);
+  }, [showQuestion, pendingQuestion]);
+
+  useEffect(() => {
+    const wasShown = wasApprovalShown.current;
+    wasApprovalShown.current = showApproval;
+    if (showApproval) {
+      setApprovalTrayMounted(true);
+      if (wasShown) {
+        setApprovalTrayOpen(true);
+        return;
+      }
+      setApprovalTrayOpen(false);
+      const frame = window.requestAnimationFrame(() => setApprovalTrayOpen(true));
+      return () => window.cancelAnimationFrame(frame);
+    }
+    setApprovalTrayOpen(false);
+    const timeout = window.setTimeout(() => setApprovalTrayMounted(false), 280);
+    return () => window.clearTimeout(timeout);
+  }, [showApproval]);
+
+  useEffect(() => {
+    const wasShown = wasQuestionShown.current;
+    wasQuestionShown.current = showQuestion;
+    if (showQuestion) {
+      setQuestionTrayMounted(true);
+      if (wasShown) {
+        setQuestionTrayOpen(true);
+        return;
+      }
+      setQuestionTrayOpen(false);
+      const frame = window.requestAnimationFrame(() => setQuestionTrayOpen(true));
+      return () => window.cancelAnimationFrame(frame);
+    }
+    setQuestionTrayOpen(false);
+    const timeout = window.setTimeout(() => setQuestionTrayMounted(false), 280);
+    return () => window.clearTimeout(timeout);
+  }, [showQuestion]);
 
   function beginResolveAnimation() {
     setResolving(true);
@@ -377,12 +431,13 @@ function SessionCard({ session, index, now, onDismiss }: SessionCardProps) {
 
       <div className="r2">{rowLine()}</div>
 
-      <div className={`tray ${showApproval ? "" : "hidden"}`}>
-        {showApproval ? (
+      <div className={`tray ${approvalTrayOpen ? "" : "hidden"}`}>
+        <div className="trayInner">
+        {approvalTrayMounted && activePermission ? (
           <>
           <div className="trayhead">
-            <span>{toolName(session)}</span>
-            {targetText(pendingPermission?.tool_input) ? <span className="path">{targetText(pendingPermission?.tool_input)}</span> : null}
+            <span>{toolName(session, activePermission)}</span>
+            {targetText(activePermission.tool_input) ? <span className="path">{targetText(activePermission.tool_input)}</span> : null}
           </div>
           {parsedDiff ? (
             <>
@@ -397,7 +452,7 @@ function SessionCard({ session, index, now, onDismiss }: SessionCardProps) {
               <div className="diffstat"><b className="a">+{parsedDiff.adds}</b> <b className="d">-{parsedDiff.dels}</b></div>
             </>
           ) : (
-            <div className="cmdchip">{commandText(session)}</div>
+            <div className="cmdchip">{commandText(activePermission)}</div>
           )}
           {!isDemo ? (
             <input
@@ -426,7 +481,7 @@ function SessionCard({ session, index, now, onDismiss }: SessionCardProps) {
             >
               {pendingAction === "allow" ? "Allowing…" : "Allow"}
             </button>
-            {(session.pending_approval?.kind === "permission" ? session.pending_approval.permission_suggestions : []).map((suggestion, suggestionIndex) => (
+            {(activePermission.permission_suggestions ?? []).map((suggestion, suggestionIndex) => (
               <button
                 className="sugg"
                 type="button"
@@ -441,12 +496,14 @@ function SessionCard({ session, index, now, onDismiss }: SessionCardProps) {
           {approvalError ? <div className="cardError">{approvalError}</div> : null}
           </>
         ) : null}
+        </div>
       </div>
 
-      <div className={`tray questionTray ${showQuestion ? "" : "hidden"}`}>
-        {showQuestion ? (
+      <div className={`tray questionTray ${questionTrayOpen ? "" : "hidden"}`}>
+        <div className="trayInner">
+        {questionTrayMounted ? (
           <>
-          {(pendingQuestion?.questions ?? demoQuestions()).map((question) => (
+          {(activeQuestion?.questions ?? demoQuestions()).map((question) => (
             <div className="questionBlock" key={question.question}>
               <div className="qtext">{question.question}</div>
               <div className="opts">
@@ -485,6 +542,7 @@ function SessionCard({ session, index, now, onDismiss }: SessionCardProps) {
           {approvalError ? <div className="cardError">{approvalError}</div> : null}
         </>
       ) : null}
+        </div>
       </div>
 
       {terminalJumpError ? <div className="cardError terminalError">{terminalJumpError}</div> : null}

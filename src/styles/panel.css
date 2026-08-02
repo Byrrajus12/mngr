@@ -82,8 +82,10 @@
   gap: 9px;
   overflow: hidden;
   padding: 9px 42px 10px 16px;
+  max-height: 96px;
   border-bottom: 1px solid var(--hairline);
   cursor: pointer;
+  transition: max-height .28s var(--ease-out), padding .28s var(--ease-out), gap .28s var(--ease-out), opacity .22s var(--ease-out);
 }
 
 .usage:hover .utoggle {
@@ -101,6 +103,7 @@
   flex-wrap: wrap;
   align-items: center;
   gap: 5px 14px;
+  max-height: 36px;
   padding: 7px 42px 8px 16px;
 }
 
@@ -135,28 +138,20 @@
   height: 8px;
 }
 .prow {
-  display: flex;
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr);
   align-items: center;
-  gap: 8px;
+  column-gap: 8px;
   min-width: 0;
 }
 
-.pid {
-  display: flex;
-  align-items: center;
-  flex: 1;
-  gap: 8px;
-  min-width: 0;
-}
 
 .usage.compact .prow {
-  display: inline-flex;
+  display: inline-grid;
+  grid-template-columns: 14px auto;
   flex: none;
 }
 
-.usage.compact .pid {
-  flex: none;
-}
 .pglyph {
   display: grid;
   place-items: center;
@@ -171,6 +166,75 @@
   width: 14px;
   height: 14px;
   flex: none;
+}
+
+.usageBody {
+  position: relative;
+  display: grid;
+  align-items: center;
+  min-width: 0;
+}
+
+.usageExpanded,
+.usageCompact {
+  grid-area: 1 / 1;
+  min-width: 0;
+  transform-origin: left center;
+}
+
+.usageExpanded {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  opacity: 1;
+  transform: scale(1);
+  transition: opacity .3s var(--ease-out) .08s, transform .3s var(--ease-out) .08s;
+}
+
+.usage.compact .usageExpanded {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  pointer-events: none;
+  transform: scale(.95);
+  transition: opacity .25s var(--ease-out), transform .25s var(--ease-out);
+}
+
+.usageCompact {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  pointer-events: none;
+  transform: scale(.95);
+  transition: opacity .15s var(--ease-out), transform .15s var(--ease-out);
+}
+
+.usage.compact .usageCompact {
+  position: static;
+  opacity: 1;
+  pointer-events: auto;
+  transform: scale(1);
+  transition: opacity .2s var(--ease-out) .1s, transform .2s var(--ease-out) .1s;
+}
+
+.usageCompact .cwin,
+.usageCompact .bsep {
+  opacity: 0;
+  transition: opacity .15s var(--ease-out);
+}
+
+.usage.compact .usageCompact .cwin,
+.usage.compact .usageCompact .bsep {
+  opacity: 1;
+  transition: opacity .2s var(--ease-out) .1s;
+}
+
+.usage.compact .usageCompact .bsep {
+  transition-delay: .12s;
+}
+
+.usage.compact .usageCompact .cwin:nth-child(3) {
+  transition-delay: .14s;
 }
 
 .pname {
@@ -515,23 +579,29 @@
 }
 
 .tray {
-  max-height: 600px;
+  display: grid;
+  grid-template-rows: 1fr;
   margin-top: 10px;
   overflow: hidden;
   border: 1px solid rgba(255, 255, 255, .09);
   border-radius: var(--r-md);
   background: rgba(5, 7, 11, .55);
-  transition: max-height .35s ease-out, opacity .25s ease-out, margin .25s ease-out;
+  transition: grid-template-rows .28s var(--ease-out), opacity .28s var(--ease-out), margin .28s var(--ease-out), border-width .28s var(--ease-out);
 }
 
 .tray.hidden {
-  max-height: 0;
+  grid-template-rows: 0fr;
   margin: 0;
   padding: 0;
   overflow: hidden;
   border: 0;
   opacity: 0;
   pointer-events: none;
+}
+
+.trayInner {
+  min-height: 0;
+  overflow: hidden;
 }
 .trayhead {
   display: flex;
@@ -874,6 +944,11 @@
   .submitAnswer,
   .check,
   .row.resolving,
+  .usage,
+  .usageExpanded,
+  .usageCompact,
+  .usageCompact .cwin,
+  .usageCompact .bsep,
   .usage.enter,
   .fil i,
   .win.crit .fil i,

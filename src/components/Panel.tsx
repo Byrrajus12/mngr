@@ -102,23 +102,20 @@ function UsageSection({
     <div className={`usage enter ${stale ? "stale" : ""} ${compact ? "compact" : ""}`} onClick={onToggleCompact}>
       {visibleRows.map((row) => (
         <div className="prow" key={row.providerId}>
-          <div className="pid">
-            <span className="pglyph" aria-hidden="true">{row.glyph}</span>
-            {compact ? null : <span className="pname">{row.providerId}</span>}
-          </div>
-          {compact ? (
-            <span className="cline">
+          <span className="pglyph" aria-hidden="true">{row.glyph}</span>
+          <div className="usageBody">
+            <div className="usageExpanded" aria-hidden={compact}>
+              <span className="pname">{row.providerId}</span>
+              {row.fiveHour ? <UsageWindowGroup label="5h" window={row.fiveHour} now={now} /> : null}
+              {row.fiveHour && row.sevenDay ? <div className="vsep" /> : null}
+              {row.sevenDay ? <UsageWindowGroup label="7d" window={row.sevenDay} now={now} /> : null}
+            </div>
+            <span className="usageCompact cline" aria-hidden={!compact}>
               {row.fiveHour ? <CompactUsageWindow label="5h" window={row.fiveHour} now={now} /> : null}
               {row.fiveHour && row.sevenDay ? <span className="bsep">|</span> : null}
               {row.sevenDay ? <CompactUsageWindow label="7d" window={row.sevenDay} now={now} /> : null}
             </span>
-          ) : (
-            <>
-              {row.fiveHour ? <UsageWindowGroup label="5h" window={row.fiveHour} now={now} /> : null}
-              {row.fiveHour && row.sevenDay ? <div className="vsep" /> : null}
-              {row.sevenDay ? <UsageWindowGroup label="7d" window={row.sevenDay} now={now} /> : null}
-            </>
-          )}
+          </div>
         </div>
       ))}
       <span className="utoggle" aria-hidden="true"><svg width="10" height="10" viewBox="0 0 10 10" fill="none"><path d="M2 4l3 3 3-3" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" /></svg></span>
