@@ -353,9 +353,11 @@ function SessionCard({ session, index, now, onDismiss }: SessionCardProps) {
       onClick={isDismissible ? handleDismiss : undefined}
     >
       <div className="r1">
-        <span className="led" />
+        <span className="led">
+          {isDone ? <svg className="checkwrap" viewBox="0 0 14 14"><path className="check" d="M2.5 7.5l3 3 6-7" /></svg> : null}
+        </span>
         <span className="glyph" aria-hidden="true">
-          {isDone ? <svg className="checkwrap" viewBox="0 0 14 14"><path className="check" d="M2.5 7.5l3 3 6-7" /></svg> : glyph(session)}
+          {glyph(session)}
         </span>
         <span className="proj">{session.project_name}</span>
         <span className="prov">{providerName(session)}</span>

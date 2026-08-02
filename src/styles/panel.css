@@ -407,6 +407,13 @@
   box-shadow: none;
 }
 
+.row.done .led {
+  background: transparent;
+  width: auto;
+  height: auto;
+  border-radius: 0;
+}
+
 .glyph {
   display: flex;
   flex: none;
@@ -757,14 +764,17 @@
 }
 
 .checkwrap {
-  width: 14px;
-  height: 14px;
+  display: block;
+  width: 7px;
+  height: 7px;
 }
 
 .check {
   fill: none;
-  stroke: #fff;
+  stroke: rgba(255, 255, 255, .55);
   stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
   stroke-dasharray: 24;
   stroke-dashoffset: 24;
   animation: draw .5s var(--ease-out) .05s forwards;
