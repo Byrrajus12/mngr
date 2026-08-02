@@ -74,7 +74,8 @@ function commandText(session: Session) {
 }
 
 function providerName(session: Session) {
-  if (session.agent_type === "claude-code") return "claude";
+  if (session.agent_type === "claude-code") return "Claude Code";
+  if (session.agent_type === "codex") return "Codex";
   return session.agent_type;
 }
 

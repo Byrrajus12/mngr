@@ -144,13 +144,13 @@ function Panel({ sessions, expanded, now, claudeUsage, onClose, onDismiss }: Pan
   const [usageCompact, setUsageCompact] = useState(true);
   const usageRows: UsageProviderRow[] = [
     {
-      providerId: "claude",
+      providerId: "Claude",
       glyph: <img src={claudeLogo} alt="" width="14" height="14" style={{ display: "block" }} />,
       fiveHour: claudeUsage?.five_hour,
       sevenDay: claudeUsage?.seven_day,
     },
     {
-      providerId: "codex",
+      providerId: "OpenAI",
       glyph: <img src={codexLogo} alt="" width="14" height="14" style={{ display: "block" }} />,
     },
   ];
