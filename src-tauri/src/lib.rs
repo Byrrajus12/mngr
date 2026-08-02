@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io::{ErrorKind, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{Emitter, Manager, PhysicalPosition, PhysicalSize, State};
 use tokio::time::{sleep, Duration};
@@ -92,6 +92,24 @@ pub struct QuestionRequest {
     pub raw_questions: Value,
 }
 
+#[derive(Debug, Deserialize)]
+struct ClaudeDesktopSessionFile {
+    #[serde(rename = "sessionId")]
+    session_id: Option<String>,
+    #[serde(rename = "cliSessionId")]
+    cli_session_id: Option<String>,
+    title: Option<String>,
+    #[serde(rename = "permissionMode")]
+    permission_mode: Option<String>,
+}
+
+#[derive(Debug)]
+struct ClaudeDesktopSessionCandidate {
+    desktop_uuid: String,
+    preferred: bool,
+    non_placeholder: bool,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PendingRequest {
@@ -113,6 +131,7 @@ pub enum SessionStatus {
 #[derive(Debug, Clone, Serialize)]
 pub struct Session {
     pub session_id: String,
+    pub desktop_session_uuid: Option<String>,
     pub agent_type: String,
     pub status: SessionStatus,
     pub project_path: String,
@@ -156,7 +175,12 @@ pub struct SessionManager {
 }
 
 impl SessionManager {
+    #[cfg(test)]
     fn apply_event(&mut self, payload: ClaudeHookPayload) -> Vec<Session> {
+        self.apply_event_inner(payload).0
+    }
+
+    fn apply_event_inner(&mut self, payload: ClaudeHookPayload) -> (Vec<Session>, bool) {
         eprintln!(
             "mngr apply_event: event={} session_id={}",
             payload.hook_event_name, payload.session_id
@@ -247,7 +271,7 @@ impl SessionManager {
                     if let Some(question) = parse_question_request(&payload, &request_id) {
                         session.status = SessionStatus::WaitingForApproval;
                         session.pending_approval = Some(PendingRequest::Question(question));
-                        return self.snapshot();
+                        return (self.snapshot(), !session_existed);
                     }
                 }
 
@@ -289,7 +313,7 @@ impl SessionManager {
             _ => {}
         }
 
-        self.snapshot()
+        (self.snapshot(), !session_existed)
     }
 
     fn resolve_approval(&mut self, request_id: &str) -> Vec<Session> {
@@ -409,6 +433,7 @@ impl Session {
     fn new(payload: &ClaudeHookPayload, now: u64) -> Self {
         Self {
             session_id: payload.session_id.clone(),
+            desktop_session_uuid: None,
             agent_type: "claude-code".to_string(),
             status: SessionStatus::Working,
             project_path: payload.cwd.clone(),
@@ -425,7 +450,7 @@ impl Session {
     }
 }
 
-pub struct SessionStore(Mutex<SessionManager>);
+pub struct SessionStore(Arc<Mutex<SessionManager>>);
 
 fn now_ms() -> u64 {
     SystemTime::now()
@@ -835,12 +860,54 @@ fn emit_sessions(app: &tauri::AppHandle, sessions: Vec<Session>) {
 }
 
 fn update_sessions(app: &tauri::AppHandle, payload: ClaudeHookPayload) {
-    let sessions = {
+    let session_id = payload.session_id.clone();
+    let (sessions, inserted, store) = {
         let store = app.state::<SessionStore>();
-        let mut manager = store.0.lock().expect("session manager mutex poisoned");
-        manager.apply_event(payload)
+        let store = store.0.clone();
+        let mut manager = store.lock().expect("session manager mutex poisoned");
+        let (sessions, inserted) = manager.apply_event_inner(payload);
+        drop(manager);
+        (sessions, inserted, store)
     };
+
     emit_sessions(app, sessions);
+    if inserted {
+        resolve_desktop_session_uuid_in_background(app.clone(), store, session_id);
+    }
+}
+
+#[cfg(windows)]
+fn resolve_desktop_session_uuid_in_background(
+    app: tauri::AppHandle,
+    store: Arc<Mutex<SessionManager>>,
+    cli_session_id: String,
+) {
+    std::thread::spawn(move || {
+        let Some(desktop_uuid) = find_claude_desktop_session_uuid(&cli_session_id) else {
+            return;
+        };
+
+        let sessions = {
+            let mut manager = store.lock().expect("session manager mutex poisoned");
+            let Some(session) = manager.sessions.get_mut(&cli_session_id) else {
+                return;
+            };
+            if session.desktop_session_uuid.as_deref() == Some(desktop_uuid.as_str()) {
+                return;
+            }
+            session.desktop_session_uuid = Some(desktop_uuid);
+            manager.snapshot()
+        };
+        emit_sessions(&app, sessions);
+    });
+}
+
+#[cfg(not(windows))]
+fn resolve_desktop_session_uuid_in_background(
+    _app: tauri::AppHandle,
+    _store: Arc<Mutex<SessionManager>>,
+    _cli_session_id: String,
+) {
 }
 
 #[tauri::command]
@@ -849,6 +916,215 @@ fn get_sessions(store: State<'_, SessionStore>) -> Vec<Session> {
     manager.snapshot()
 }
 
+#[cfg(windows)]
+fn collect_claude_desktop_session_files(dir: &Path, files: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_claude_desktop_session_files(&path, files);
+            continue;
+        }
+
+        let is_local_json = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| name.starts_with("local_") && name.ends_with(".json"))
+            .unwrap_or(false);
+        if is_local_json {
+            files.push(path);
+        }
+    }
+}
+
+#[cfg(windows)]
+fn desktop_uuid_from_session_id(session_id: &str) -> Option<String> {
+    let desktop_uuid = session_id.strip_prefix("local_").unwrap_or(session_id);
+    let looks_like_uuid = desktop_uuid
+        .chars()
+        .all(|ch| ch.is_ascii_hexdigit() || ch == '-');
+    (!desktop_uuid.is_empty() && looks_like_uuid).then(|| desktop_uuid.to_string())
+}
+
+#[cfg(windows)]
+fn desktop_uuid_from_file_name(path: &Path) -> Option<String> {
+    let file_name = path.file_name()?.to_str()?;
+    file_name
+        .strip_prefix("local_")?
+        .strip_suffix(".json")
+        .map(ToString::to_string)
+}
+
+#[cfg(windows)]
+fn find_claude_desktop_session_uuid_in_packages_dir(
+    packages_dir: &Path,
+    cli_session_id: &str,
+) -> Option<String> {
+    let package_entries = fs::read_dir(packages_dir).ok()?;
+    let mut candidates = Vec::new();
+
+    for package_entry in package_entries.flatten() {
+        let package_name_matches = package_entry
+            .file_name()
+            .to_str()
+            .map(|name| name.starts_with("Claude_"))
+            .unwrap_or(false);
+        if !package_name_matches {
+            continue;
+        }
+
+        let sessions_dir = package_entry
+            .path()
+            .join("LocalCache")
+            .join("Roaming")
+            .join("Claude")
+            .join("claude-code-sessions");
+        if !sessions_dir.is_dir() {
+            continue;
+        }
+
+        let mut files = Vec::new();
+        collect_claude_desktop_session_files(&sessions_dir, &mut files);
+        for file in files {
+            let Ok(contents) = fs::read_to_string(&file) else {
+                continue;
+            };
+            let Ok(session_file) = serde_json::from_str::<ClaudeDesktopSessionFile>(&contents)
+            else {
+                continue;
+            };
+            if session_file.cli_session_id.as_deref() != Some(cli_session_id) {
+                continue;
+            }
+
+            let Some(session_id) = session_file.session_id.as_deref() else {
+                continue;
+            };
+            let Some(desktop_uuid) = desktop_uuid_from_session_id(session_id) else {
+                continue;
+            };
+            let preferred = session_file
+                .title
+                .as_deref()
+                .is_some_and(|title| !title.trim().is_empty())
+                || session_file.permission_mode.as_deref() == Some("acceptEdits");
+            let non_placeholder = desktop_uuid_from_file_name(&file)
+                .as_deref()
+                .is_some_and(|file_uuid| file_uuid != cli_session_id);
+            candidates.push(ClaudeDesktopSessionCandidate {
+                desktop_uuid,
+                preferred,
+                non_placeholder,
+            });
+        }
+    }
+
+    if candidates.len() == 1 {
+        return candidates.pop().map(|candidate| candidate.desktop_uuid);
+    }
+
+    candidates
+        .iter()
+        .find(|candidate| candidate.preferred)
+        .or_else(|| {
+            candidates
+                .iter()
+                .find(|candidate| candidate.non_placeholder)
+        })
+        .or_else(|| candidates.first())
+        .map(|candidate| candidate.desktop_uuid.clone())
+}
+
+#[cfg(windows)]
+fn find_claude_desktop_session_uuid(cli_session_id: &str) -> Option<String> {
+    let local_app_data = std::env::var_os("LOCALAPPDATA")?;
+    let packages_dir = PathBuf::from(local_app_data).join("Packages");
+    find_claude_desktop_session_uuid_in_packages_dir(&packages_dir, cli_session_id)
+}
+#[cfg(windows)]
+fn open_claude_resume_deep_link(desktop_uuid: &str) -> Result<(), String> {
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    let url = format!("claude://resume?session={desktop_uuid}");
+    let operation = to_wide("open");
+    let wide_url = url
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect::<Vec<u16>>();
+    let result = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            operation.as_ptr(),
+            wide_url.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            SW_SHOWNORMAL,
+        )
+    } as isize;
+    if result <= 32 {
+        return Err(format!(
+            "failed to open Claude Desktop deep link: ShellExecuteW returned {result}"
+        ));
+    }
+
+    Ok(())
+}
+
+#[cfg(windows)]
+fn jump_to_claude_desktop_session_uuid(desktop_uuid: &str) -> Result<(), String> {
+    open_claude_resume_deep_link(desktop_uuid)
+}
+
+#[cfg(windows)]
+#[tauri::command]
+fn jump_to_claude_desktop_session(session_id: String) -> Result<(), String> {
+    let desktop_uuid = find_claude_desktop_session_uuid(&session_id)
+        .ok_or_else(|| "Claude Desktop session mapping not found".to_string())?;
+    jump_to_claude_desktop_session_uuid(&desktop_uuid)
+}
+
+#[cfg(not(windows))]
+#[tauri::command]
+fn jump_to_claude_desktop_session(_session_id: String) -> Result<(), String> {
+    Err("jump to Claude Desktop session is only available on Windows".to_string())
+}
+
+#[cfg(windows)]
+#[tauri::command]
+fn jump_to_session(store: State<'_, SessionStore>, session_id: String) -> Result<(), String> {
+    let cached_desktop_uuid = {
+        let manager = store.0.lock().expect("session manager mutex poisoned");
+        manager
+            .sessions
+            .get(&session_id)
+            .and_then(|session| session.desktop_session_uuid.clone())
+    };
+    if let Some(desktop_uuid) = cached_desktop_uuid {
+        return open_claude_resume_deep_link(&desktop_uuid);
+    }
+
+    if let Some(desktop_uuid) = find_claude_desktop_session_uuid(&session_id) {
+        {
+            let mut manager = store.0.lock().expect("session manager mutex poisoned");
+            if let Some(session) = manager.sessions.get_mut(&session_id) {
+                session.desktop_session_uuid = Some(desktop_uuid.clone());
+            }
+        }
+        return open_claude_resume_deep_link(&desktop_uuid);
+    }
+
+    jump_to_terminal(store, session_id)
+}
+
+#[cfg(not(windows))]
+#[tauri::command]
+fn jump_to_session(store: State<'_, SessionStore>, session_id: String) -> Result<(), String> {
+    jump_to_terminal(store, session_id)
+}
 #[cfg(windows)]
 #[tauri::command]
 fn jump_to_terminal(store: State<'_, SessionStore>, session_id: String) -> Result<(), String> {
@@ -1317,7 +1593,9 @@ fn cleanup_responses_dir(responses_dir: &Path, now: SystemTime) -> std::io::Resu
 
 pub fn run() {
     tauri::Builder::default()
-        .manage(SessionStore(Mutex::new(SessionManager::default())))
+        .manage(SessionStore(Arc::new(
+            Mutex::new(SessionManager::default()),
+        )))
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Focused(false) = event {
                 let _ = window.emit("window-blurred", ());
@@ -1341,6 +1619,8 @@ pub fn run() {
             get_sessions,
             install_claude_hooks,
             get_claude_usage,
+            jump_to_claude_desktop_session,
+            jump_to_session,
             jump_to_terminal,
             resolve_approval,
             resolve_question,

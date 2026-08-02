@@ -24,4 +24,4 @@ tokio = { version = "1", features = ["io-util", "net", "rt", "macros", "time"] }
 [target.'cfg(windows)'.dependencies]
 uiautomation = "0.5"
 windows = { version = "0.48", features = ["Win32_Foundation"] }
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_Diagnostics_ToolHelp", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_Diagnostics_ToolHelp", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }

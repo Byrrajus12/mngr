@@ -313,7 +313,7 @@ function SessionCard({ session, index, now, onDismiss }: SessionCardProps) {
 
     setTerminalJumpError(null);
     try {
-      await invoke("jump_to_terminal", { sessionId: session.session_id });
+      await invoke("jump_to_session", { sessionId: session.session_id });
     } catch (error) {
       setTerminalJumpError(error instanceof Error ? error.message : String(error));
     }
