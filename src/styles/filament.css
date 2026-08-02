@@ -25,8 +25,8 @@
   top: -10px;
   right: 0;
   bottom: -10px;
-  width: 11px;
-  border-radius: 11px 0 0 11px;
+  width: 9px;
+  border-radius: 13px 0 0 13px;
   background: var(--glass-tint);
   -webkit-backdrop-filter: blur(28px) saturate(1.5);
   backdrop-filter: blur(28px) saturate(1.5);
@@ -44,7 +44,7 @@
   top: 0;
   height: 100%;
   width: 1px;
-  background: rgba(200, 208, 220, 0.7);
+  background: rgba(200, 208, 220, 0.4);
   border-radius: 1px;
   opacity: 0;
   transition: opacity .6s ease;
