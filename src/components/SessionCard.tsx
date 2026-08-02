@@ -1,5 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { useState } from "react";
+import claudeCodeLogo from "../assets/providers/claudecode.svg";
+import codexLogo from "../assets/providers/codex.svg";
 import type { PermissionSuggestion, QuestionRequest, Session } from "../types";
 
 type SessionCardProps = {
@@ -23,37 +25,31 @@ function elapsed(startedAt: number, now: number, lastEventAt?: number) {
 
 function glyph(session: Session) {
   if (session.agent_type === "codex") {
-    return (
-      <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="#7fd0c0" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-        <path d="M6 4 L2.5 8 L6 12" />
-        <path d="M10 4 L13.5 8 L10 12" />
-      </svg>
-    );
+    return <img src={codexLogo} alt="" width="14" height="14" style={{ display: "block" }} />;
   }
 
-  return (
-    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="#d9a4f5" strokeWidth="1.5" strokeLinecap="round" aria-hidden="true">
-      <path d="M8 2 V14 M2 8 H14 M3.8 3.8 L12.2 12.2 M12.2 3.8 L3.8 12.2" />
-    </svg>
-  );
+  return <img src={claudeCodeLogo} alt="" width="14" height="14" style={{ display: "block" }} />;
 }
 
 function statusClass(session: Session) {
-  if (session.status === "WaitingForApproval" && session.pending_approval?.kind === "question") return "attention-q";
-  if (session.status === "WaitingForApproval") return "attention-req";
-  if (session.status === "WaitingForInput") return "attention-q";
-  if (session.status === "Done" || session.status === "Idle") return "done";
+  if (session.status === "WaitingForApproval" && session.pending_approval?.kind === "question") return "q";
+  if (session.status === "WaitingForApproval") return "perm";
+  if (session.status === "WaitingForInput") return "q";
+  if (session.status === "Error") return "err";
+  if (session.status === "Idle") return "idle";
+  if (session.status === "Done") return "done";
   return "working";
 }
 
 function shouldFreezeElapsed(session: Session) {
-  return session.status === "Idle" || session.status === "Done";
+  return session.status === "Idle" || session.status === "Done" || session.status === "Error";
 }
 
 function statusText(session: Session, now: number) {
   if (session.status === "WaitingForApproval" && session.pending_approval?.kind === "question") return "Waiting for your answer";
   if (session.status === "WaitingForApproval") return "Waiting for permission";
   if (session.status === "WaitingForInput") return "Waiting for your answer";
+  if (session.status === "Error") return "Session stopped responding";
   if (session.status === "Done") return `Finished - ${elapsed(session.started_at, now, session.last_event_at)}`;
   if (session.status === "Idle") return `Idle - ${elapsed(session.started_at, now, session.last_event_at)}`;
   if (session.current_tool) return `Using ${session.current_tool}`;
@@ -75,6 +71,75 @@ function commandText(session: Session) {
   }
   if (input == null) return name;
   return `${name} ${String(input)}`;
+}
+
+function providerName(session: Session) {
+  if (session.agent_type === "claude-code") return "claude";
+  return session.agent_type;
+}
+
+function toolName(session: Session) {
+  if (session.pending_approval?.kind === "permission") return session.pending_approval.tool_name || "command";
+  return session.current_tool || "Working";
+}
+
+function targetText(input: unknown) {
+  if (!input || typeof input !== "object") return null;
+  const obj = input as Record<string, unknown>;
+  for (const field of ["file_path", "path", "target", "cwd"]) {
+    if (typeof obj[field] === "string") return obj[field] as string;
+  }
+  if (typeof obj.command === "string") return obj.command;
+  return null;
+}
+
+type DiffLine = {
+  kind: "add" | "del" | "ctx";
+  line: string;
+  number: number | null;
+};
+
+function diffText(input: unknown) {
+  if (!input || typeof input !== "object") return null;
+  const obj = input as Record<string, unknown>;
+  for (const field of ["diff", "patch", "edit_diff"]) {
+    if (typeof obj[field] === "string" && (obj[field] as string).trim()) return obj[field] as string;
+  }
+  return null;
+}
+
+function parseDiff(input: unknown) {
+  const text = diffText(input);
+  if (!text) return null;
+
+  let nextLine = 1;
+  let adds = 0;
+  let dels = 0;
+  const lines: DiffLine[] = [];
+
+  for (const raw of text.split(/\r?\n/)) {
+    if (!raw || raw.startsWith("+++") || raw.startsWith("---")) continue;
+    const hunk = raw.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+    if (hunk) {
+      nextLine = Number(hunk[1]);
+      continue;
+    }
+
+    const marker = raw[0];
+    if (marker === "+") {
+      adds += 1;
+      lines.push({ kind: "add", line: raw, number: nextLine });
+      nextLine += 1;
+    } else if (marker === "-") {
+      dels += 1;
+      lines.push({ kind: "del", line: raw, number: null });
+    } else {
+      lines.push({ kind: "ctx", line: raw.startsWith(" ") ? raw : ` ${raw}`, number: nextLine });
+      nextLine += 1;
+    }
+  }
+
+  return lines.length ? { lines, adds, dels } : null;
 }
 
 function demoQuestions(): QuestionRequest["questions"] {
@@ -116,16 +181,30 @@ function suggestionLabel(suggestion: PermissionSuggestion) {
 function SessionCard({ session, index, now, onDismiss }: SessionCardProps) {
   const cls = statusClass(session);
   const isDone = cls === "done";
+  const isDismissible = isDone || cls === "err";
   const isDemo = session.session_id.startsWith("demo-");
   const [resolved, setResolved] = useState<string | null>(null);
+  const [resolving, setResolving] = useState(false);
   const [reason, setReason] = useState("");
   const [pendingAction, setPendingAction] = useState<string | null>(null);
   const [approvalError, setApprovalError] = useState<string | null>(null);
   const [terminalJumpError, setTerminalJumpError] = useState<string | null>(null);
+  const [selectedAnswers, setSelectedAnswers] = useState<Record<string, string[]>>({});
 
   const pendingQuestion = session.pending_approval?.kind === "question" ? session.pending_approval : null;
+  const pendingPermission = session.pending_approval?.kind === "permission" ? session.pending_approval : null;
   const showApproval = session.status === "WaitingForApproval" && session.pending_approval?.kind !== "question" && !resolved;
   const showQuestion = ((session.status === "WaitingForApproval" && !!pendingQuestion) || session.status === "WaitingForInput") && !resolved;
+  const parsedDiff = pendingPermission ? parseDiff(pendingPermission.tool_input) : null;
+
+  function beginResolveAnimation() {
+    setResolving(true);
+  }
+
+  function handleDismiss() {
+    beginResolveAnimation();
+    window.setTimeout(onDismiss, 450);
+  }
 
   async function resolveRealApproval(decision: "allow" | "deny", updatedPermissions?: PermissionSuggestion[]) {
     const requestId = session.pending_approval?.kind === "permission" ? session.pending_approval.request_id : null;
@@ -212,34 +291,54 @@ function SessionCard({ session, index, now, onDismiss }: SessionCardProps) {
     resolveRealQuestion(question, answer);
   }
 
+  function toggleMultiAnswer(question: string, answer: string) {
+    setSelectedAnswers((current) => {
+      const selected = current[question] ?? [];
+      const next = selected.includes(answer) ? selected.filter((item) => item !== answer) : [...selected, answer];
+      return { ...current, [question]: next };
+    });
+  }
+
+  function handleMultiSubmit(question: string) {
+    const answer = (selectedAnswers[question] ?? []).join(", ");
+    handleQuestionAnswer(question, answer);
+  }
+
+  function rowLine() {
+    if (session.status === "WaitingForApproval" && pendingPermission) {
+      return <span className="statusword">PERMISSION</span>;
+    }
+    if (showQuestion) {
+      const header = (pendingQuestion?.questions ?? demoQuestions()).find((question) => question.header)?.header;
+      return <span className="statusword">QUESTION{header ? ` · ${header.toUpperCase()}` : ""}</span>;
+    }
+    if (session.status === "Error") return <span className="statusword">ERROR</span>;
+    if (session.status === "Done") return <span className="dismiss">finished - click to dismiss</span>;
+    if (session.status === "Idle") return "idle - waiting for next task";
+    if (session.current_tool) {
+      return (
+        <>
+          <span className="verb">{session.current_tool}</span> {session.project_path}
+        </>
+      );
+    }
+    return statusText(session, now);
+  }
+
   return (
     <article
-      className={`card ${cls}`}
+      className={`card row ${cls} ${resolving ? "resolving" : ""}`}
       style={{ animationDelay: `${index * 40 + 40}ms` }}
-      onClick={isDone ? onDismiss : undefined}
+      onClick={isDismissible ? handleDismiss : undefined}
     >
-      <div className="top">
-        <span className="glyph">
-          {isDone ? (
-            <svg className="checkwrap" viewBox="0 0 22 22" fill="none" stroke="var(--emerald)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-              <path d="M5 11.5 L9.5 16 L17 6.5" />
-            </svg>
-          ) : (
-            glyph(session)
-          )}
+      <div className="r1">
+        <span className="led" />
+        <span className="glyph" aria-hidden="true">
+          {isDone ? <svg className="checkwrap" viewBox="0 0 14 14"><path className="check" d="M2.5 7.5l3 3 6-7" /></svg> : glyph(session)}
         </span>
-        <div>
-          <div className="proj">{session.project_name}</div>
-          <div className="act">{statusText(session, now)}</div>
-        </div>
-        <div className="meta">
-          <span className={`sdot ${cls}`} />
-          <br />
-          <span className="el">{elapsed(session.started_at, now, shouldFreezeElapsed(session) ? session.last_event_at : undefined)}</span>
-        </div>
-      </div>
-
-      {!isDone ? (
+        <span className="proj">{session.project_name}</span>
+        <span className="prov">{providerName(session)}</span>
+        <span className="el">{elapsed(session.started_at, now, shouldFreezeElapsed(session) ? session.last_event_at : undefined)}</span>
         <button
           className="jump"
           type="button"
@@ -251,86 +350,121 @@ function SessionCard({ session, index, now, onDismiss }: SessionCardProps) {
         >
           <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M3 9L9 3M4.5 3H9v4.5" stroke="currentColor" strokeWidth="1.3" fill="none" strokeLinecap="round" strokeLinejoin="round" /></svg>
         </button>
-      ) : null}
+      </div>
+
+      <div className="r2">{rowLine()}</div>
 
       {showApproval ? (
-        <>
-          <div className="cmdchip">{commandText(session)}</div>
+        <div className="tray">
+          <div className="trayhead">
+            <span>{toolName(session)}</span>
+            {targetText(pendingPermission?.tool_input) ? <span className="path">{targetText(pendingPermission?.tool_input)}</span> : null}
+          </div>
+          {parsedDiff ? (
+            <>
+              <div className="diff">
+                {parsedDiff.lines.map((line, lineIndex) => (
+                  <div className={`dl ${line.kind}`} key={`${line.kind}-${lineIndex}`}>
+                    <span className="ln">{line.number ?? ""}</span>
+                    <span>{line.line}</span>
+                  </div>
+                ))}
+              </div>
+              <div className="diffstat"><b className="a">+{parsedDiff.adds}</b> <b className="d">-{parsedDiff.dels}</b></div>
+            </>
+          ) : (
+            <div className="cmdchip">{commandText(session)}</div>
+          )}
           {!isDemo ? (
             <input
               className="reasonInput"
               type="text"
               value={reason}
               onChange={(event) => setReason(event.target.value)}
-              placeholder="Optional deny reason"
+              placeholder="optional deny reason"
               aria-label="Optional deny reason"
             />
           ) : null}
-          <div className="btns">
-            <button
-              className="allow"
-              type="button"
-              disabled={pendingAction !== null}
-              onClick={() => handleAllow()}
-            >
-              {pendingAction === "allow" ? "Allowing" : "Allow"}
-            </button>
-            {(session.pending_approval?.kind === "permission" ? session.pending_approval.permission_suggestions : []).map((suggestion, suggestionIndex) => (
-              <button
-                className="suggestionAllow"
-                type="button"
-                disabled={pendingAction !== null}
-                key={suggestionIndex}
-                onClick={() => handleAllow([suggestion])}
-              >
-                {pendingAction === "suggestion" ? "Applying" : suggestionLabel(suggestion)}
-              </button>
-            ))}
+          <div className="actions">
             <button
               className="deny"
               type="button"
               disabled={pendingAction !== null}
               onClick={handleDeny}
             >
-              {pendingAction === "deny" ? "Denying" : "Deny"}
+              {pendingAction === "deny" ? "Denying…" : "Deny"}
             </button>
+            <button
+              className="allow"
+              type="button"
+              disabled={pendingAction !== null}
+              onClick={() => handleAllow()}
+            >
+              {pendingAction === "allow" ? "Allowing…" : "Allow"}
+            </button>
+            {(session.pending_approval?.kind === "permission" ? session.pending_approval.permission_suggestions : []).map((suggestion, suggestionIndex) => (
+              <button
+                className="sugg"
+                type="button"
+                disabled={pendingAction !== null}
+                key={suggestionIndex}
+                onClick={() => handleAllow([suggestion])}
+              >
+                {pendingAction === "suggestion" ? "Applying…" : suggestionLabel(suggestion)}
+              </button>
+            ))}
           </div>
           {approvalError ? <div className="cardError">{approvalError}</div> : null}
-        </>
+        </div>
       ) : null}
 
       {showQuestion ? (
-        <>
-          {/* Question UI is intentionally minimal pending a later design pass. */}
+        <div className="tray questionTray">
           {(pendingQuestion?.questions ?? demoQuestions()).map((question) => (
             <div className="questionBlock" key={question.question}>
-              {question.header ? <div className="qheader">{question.header}</div> : null}
               <div className="qtext">{question.question}</div>
-              <div className="pills">
-                {question.options.map((option) => (
+              <div className="opts">
+                {question.options.map((option) => {
+                  const selected = (selectedAnswers[question.question] ?? []).includes(option.label);
+                  return (
+                    <button
+                      className={`opt ${selected ? "selected" : ""}`}
+                      type="button"
+                      disabled={pendingAction !== null}
+                      key={option.label}
+                      onClick={() =>
+                        question.multiSelect
+                          ? toggleMultiAnswer(question.question, option.label)
+                          : handleQuestionAnswer(question.question, option.label)
+                      }
+                    >
+                      <b>{question.multiSelect && selected ? `✓ ${option.label}` : pendingAction === option.label ? "Answering…" : option.label}</b>
+                      <span className="pillDesc">{option.description}</span>
+                    </button>
+                  );
+                })}
+                {question.multiSelect ? (
                   <button
-                    className="pill"
+                    className="submitAnswer"
                     type="button"
-                    disabled={pendingAction !== null}
-                    key={option.label}
-                    onClick={() => handleQuestionAnswer(question.question, option.label)}
+                    disabled={pendingAction !== null || (selectedAnswers[question.question] ?? []).length === 0}
+                    onClick={() => handleMultiSubmit(question.question)}
                   >
-                    <span>{pendingAction === option.label ? "Answering" : option.label}</span>{" "}
-                    <span className="pillDesc">{option.description}</span>
+                    {pendingAction === (selectedAnswers[question.question] ?? []).join(", ") ? "Answering…" : "Submit"}
                   </button>
-                ))}
+                ) : null}
               </div>
             </div>
           ))}
           {approvalError ? <div className="cardError">{approvalError}</div> : null}
-        </>
+        </div>
       ) : null}
 
-      {terminalJumpError ? <div className="cardError">{terminalJumpError}</div> : null}
+      {terminalJumpError ? <div className="cardError terminalError">{terminalJumpError}</div> : null}
 
       {resolved ? <div className="cardResolved">{resolved}</div> : null}
 
-      {isDone ? <div className="dismiss">click to dismiss</div> : null}
+      {cls === "err" ? <div className="errmsg">{statusText(session, now)}</div> : null}
     </article>
   );
 }

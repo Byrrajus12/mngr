@@ -44,14 +44,14 @@ function glyph(session: Session) {
   if (session.agent_type === "codex") {
     return (
       <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true">
-        <path d="M5 3L1.5 7 5 11M9 3l3.5 4L9 11" stroke="#7fd0c0" strokeWidth="1.3" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+        <path d="M5 3L1.5 7 5 11M9 3l3.5 4L9 11" stroke="var(--prov-codex)" strokeWidth="1.3" fill="none" strokeLinecap="round" strokeLinejoin="round" />
       </svg>
     );
   }
 
   return (
     <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true">
-      <path d="M7 1v12M1 7h12M2.8 2.8l8.4 8.4M11.2 2.8l-8.4 8.4" stroke="#d9a4f5" strokeWidth="1.15" strokeLinecap="round" />
+      <path d="M7 1v12M1 7h12M2.8 2.8l8.4 8.4M11.2 2.8l-8.4 8.4" stroke="var(--prov-claude)" strokeWidth="1.15" strokeLinecap="round" />
     </svg>
   );
 }

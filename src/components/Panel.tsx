@@ -1,3 +1,5 @@
+import type { ReactNode } from "react";
+import claudeLogo from "../assets/providers/claude.svg";
 import type { ClaudeUsageState, ClaudeUsageWindow, Session } from "../types";
 import SessionCard from "./SessionCard";
 
@@ -13,7 +15,7 @@ type PanelProps = {
 function formatResetCountdown(resetsAt: number | null | undefined, now: number) {
   if (!resetsAt) return "reset unknown";
   const remainingMs = resetsAt - now;
-  if (remainingMs <= 0) return "reset due";
+  if (remainingMs <= 10000) return "resetting";
 
   const totalMinutes = Math.ceil(remainingMs / 60000);
   const days = Math.floor(totalMinutes / 1440);
@@ -29,28 +31,47 @@ function isUsageStale(lastUpdated: number | null | undefined, now: number) {
   return !!lastUpdated && now - lastUpdated > 15 * 60 * 1000;
 }
 
-function UsageBar({ label, window, now }: { label: string; window?: ClaudeUsageWindow | null; now: number }) {
-  if (!window) {
-    return (
-      <div className="usageBar empty">
-        <div className="txt">
-          <span>{label} --</span>
-          <span>waiting</span>
-        </div>
-        <div className="track"><div className="fill" style={{ width: "0%" }} /></div>
-      </div>
-    );
-  }
-
+function UsageMeter({ label, window, now }: { label: string; window: ClaudeUsageWindow; now: number }) {
   const percent = Math.max(0, Math.min(100, Math.round(window.used_percentage)));
+  const hot = percent >= 50;
 
   return (
-    <div className="usageBar">
-      <div className="txt">
-        <span>{label} {percent}%</span>
-        <span>{formatResetCountdown(window.resets_at, now)}</span>
-      </div>
-      <div className="track"><div className="fill" style={{ width: `${percent}%` }} /></div>
+    <div className={`meter ${hot ? "hot" : ""}`}>
+      <span className="w">{label}</span>
+      <div className="bar"><i style={{ width: `${percent}%` }} /></div>
+      <span className="v">
+        <b>{percent}%</b>{" \u00b7 "}{formatResetCountdown(window.resets_at, now)}
+      </span>
+    </div>
+  );
+}
+
+type UsageProviderRow = {
+  providerId: string;
+  glyph: ReactNode;
+  fiveHour?: ClaudeUsageWindow | null;
+  sevenDay?: ClaudeUsageWindow | null;
+};
+
+function UsageSection({ rows, now, stale }: { rows: UsageProviderRow[]; now: number; stale: boolean }) {
+  const visibleRows = rows.filter((row) => row.fiveHour || row.sevenDay);
+
+  if (visibleRows.length === 0) return null;
+
+  return (
+    <div className={`usage ${stale ? "stale" : ""}`}>
+      {visibleRows.map((row) => (
+        <div className="prow" key={row.providerId}>
+          <div className="providerHead">
+            <span className="pglyph" aria-hidden="true">{row.glyph}</span>
+            <span className="pname">{row.providerId}</span>
+          </div>
+          <div className="providerMeters">
+            {row.fiveHour ? <UsageMeter label="5h" window={row.fiveHour} now={now} /> : null}
+            {row.sevenDay ? <UsageMeter label="7d" window={row.sevenDay} now={now} /> : null}
+          </div>
+        </div>
+      ))}
     </div>
   );
 }
@@ -70,19 +91,25 @@ function aggregateStatus(sessions: Session[]) {
 }
 
 function Panel({ sessions, expanded, now, claudeUsage, onClose, onDismiss }: PanelProps) {
+  const usageRows: UsageProviderRow[] = [
+    {
+      providerId: "claude",
+      glyph: <img src={claudeLogo} alt="" width="14" height="14" style={{ display: "block" }} />,
+      fiveHour: claudeUsage?.five_hour,
+      sevenDay: claudeUsage?.seven_day,
+    },
+  ];
+
   return (
     <aside className={`panel ${expanded ? "open" : ""}`} aria-hidden={!expanded}>
       <header className="phead">
         <div>
           <div className="wm">mngr</div>
           <div className="agg">{aggregateStatus(sessions)}</div>
-          <div className={`usage ${isUsageStale(claudeUsage?.last_updated, now) ? "stale" : ""}`}>
-            <UsageBar label="5h" window={claudeUsage?.five_hour} now={now} />
-            <UsageBar label="7d" window={claudeUsage?.seven_day} now={now} />
-          </div>
         </div>
         <button className="pclose" type="button" onClick={onClose}>esc</button>
       </header>
+      <UsageSection rows={usageRows} now={now} stale={isUsageStale(claudeUsage?.last_updated, now)} />
 
       <section className="cards" aria-label="Agent sessions">
         {sessions.length === 0 ? (
@@ -104,3 +131,5 @@ function Panel({ sessions, expanded, now, claudeUsage, onClose, onDismiss }: Pan
 }
 
 export default Panel;
+
+
