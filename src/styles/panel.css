@@ -77,29 +77,86 @@
 }
 
 .usage {
+  position: relative;
   display: grid;
-  gap: 8px;
-  padding: 10px 16px;
+  gap: 9px;
+  overflow: hidden;
+  padding: 9px 42px 10px 16px;
   border-bottom: 1px solid var(--hairline);
+  cursor: pointer;
+}
+
+.usage:hover .utoggle {
+  border-color: rgba(255, 255, 255, .28);
+  background: rgba(255, 255, 255, .06);
+  color: var(--ink-dim);
 }
 
 .usage.stale {
   opacity: .72;
 }
 
-.prow {
-  display: grid;
-  gap: 7px;
-  min-width: 0;
+.usage.compact {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px 14px;
+  padding: 7px 42px 8px 16px;
 }
 
-.providerHead {
+.usage.compact .utoggle {
+  transform: none;
+}
+
+.usage.enter {
+  animation: usageIn .55s var(--ease-out) both;
+}
+
+.utoggle {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  border: 1px solid rgba(255, 255, 255, .12);
+  border-radius: var(--r-sm);
+  background: rgba(255, 255, 255, .03);
+  color: var(--ink-faint);
+  pointer-events: none;
+  transform: rotate(180deg);
+  transition: border-color .15s ease, color .15s ease, background .15s ease, transform .15s ease;
+}
+
+.utoggle svg {
+  display: block;
+  width: 8px;
+  height: 8px;
+}
+.prow {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   min-width: 0;
 }
 
+.pid {
+  display: flex;
+  align-items: center;
+  flex: 1;
+  gap: 8px;
+  min-width: 0;
+}
+
+.usage.compact .prow {
+  display: inline-flex;
+  flex: none;
+}
+
+.usage.compact .pid {
+  flex: none;
+}
 .pglyph {
   display: grid;
   place-items: center;
@@ -126,63 +183,124 @@
   white-space: nowrap;
 }
 
-.providerMeters {
+.win {
   display: grid;
-  gap: 7px;
-  min-width: 0;
-}
-
-.meter {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  min-width: 0;
-}
-
-.meter .w {
   flex: none;
-  width: 16px;
+  gap: 4px;
+  width: 124px;
+}
+
+.wtop {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-variant-numeric: tabular-nums;
+}
+
+.wl {
   color: var(--ink-faint);
   font: 500 9.5px var(--mono);
 }
 
-.meter .bar {
-  flex: 1;
-  height: 3px;
-  min-width: 24px;
-  overflow: hidden;
-  border-radius: 2px;
-  background: rgba(255, 255, 255, .12);
+.pct {
+  color: var(--ink);
+  font: 600 12.5px var(--mono);
 }
 
-.meter .bar i {
-  display: block;
-  height: 100%;
-  border-radius: 2px;
-  background: linear-gradient(90deg, var(--acc-work), #8ff0c8);
-}
-
-.meter.hot .bar i {
-  background: linear-gradient(90deg, var(--acc-perm), #ffd88a);
-}
-
-.meter .v {
-  flex: none;
-  color: var(--ink-dim);
-  font: 500 10px var(--mono);
-  font-variant-numeric: tabular-nums;
+.cd {
+  margin-left: auto;
+  color: var(--ink-faint);
+  font: 500 9.5px var(--mono);
   white-space: nowrap;
 }
 
-.meter .v b {
-  color: var(--ink);
-  font-weight: 600;
+.fil {
+  position: relative;
+  height: 2px;
+  overflow: visible;
+  border-radius: 1px;
+  background: rgba(255, 255, 255, .10);
 }
 
-.meter.hot .v b {
+.fil i {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: 1px;
+  background: linear-gradient(90deg, var(--acc-work), #8ff0c8);
+  box-shadow: 0 0 6px rgba(52, 211, 153, .45);
+  transition: width .6s ease-out;
+}
+
+.vsep {
+  flex: none;
+  width: 1px;
+  height: 20px;
+  background: var(--hairline);
+}
+
+.win.hot .pct {
   color: var(--acc-perm-text);
 }
 
+.win.hot .fil i {
+  background: linear-gradient(90deg, var(--acc-perm), #ffd88a);
+  box-shadow: 0 0 6px rgba(251, 191, 36, .45);
+}
+
+.win.crit .pct {
+  color: var(--acc-err-text);
+}
+
+.win.crit .fil i {
+  background: linear-gradient(90deg, #ff7a76, #ffb3b0);
+  box-shadow: 0 0 8px rgba(255, 122, 118, .55);
+  animation: critGlow 1.6s ease-in-out infinite;
+}
+
+.cline {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  min-width: 0;
+  color: var(--ink-faint);
+  font: 500 10px var(--mono);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: .02em;
+  white-space: nowrap;
+}
+
+.cwin {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+}
+
+.cline b {
+  color: var(--ink);
+  font: 600 11px var(--mono);
+}
+
+.cline b.hot {
+  color: var(--acc-perm-text);
+}
+
+.cline b.crit {
+  color: var(--acc-err-text);
+}
+
+.cline .bsep {
+  color: rgba(255, 255, 255, .14);
+}
+
+.cline .cd {
+  margin-left: 0;
+  font-size: 9.5px;
+}
+
+.cd.resetting {
+  color: var(--acc-work);
+  animation: softPulse 1.4s ease-in-out infinite;
+}
 .pclose {
   padding: 3px 7px;
   border: 1px solid rgba(255, 255, 255, .16);
@@ -671,6 +789,24 @@
   animation: resolveOut .45s var(--ease-out) forwards;
 }
 
+@keyframes usageIn {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes critGlow {
+  50% { box-shadow: 0 0 12px rgba(255, 122, 118, .85); }
+}
+
+@keyframes softPulse {
+  50% { opacity: .35; }
+}
 @keyframes cardEnter {
   from {
     opacity: 0;
@@ -715,7 +851,11 @@
   .opt,
   .submitAnswer,
   .check,
-  .row.resolving {
+  .row.resolving,
+  .usage.enter,
+  .fil i,
+  .win.crit .fil i,
+  .cd.resetting {
     animation: none !important;
     transition: none !important;
   }

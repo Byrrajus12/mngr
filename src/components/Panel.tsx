@@ -1,5 +1,7 @@
 import type { ReactNode } from "react";
+import { useState } from "react";
 import claudeLogo from "../assets/providers/claude.svg";
+import codexLogo from "../assets/providers/codex.svg";
 import type { ClaudeUsageState, ClaudeUsageWindow, Session } from "../types";
 import SessionCard from "./SessionCard";
 
@@ -31,18 +33,44 @@ function isUsageStale(lastUpdated: number | null | undefined, now: number) {
   return !!lastUpdated && now - lastUpdated > 15 * 60 * 1000;
 }
 
-function UsageMeter({ label, window, now }: { label: string; window: ClaudeUsageWindow; now: number }) {
+function formatVisibleCountdown(window: ClaudeUsageWindow, now: number) {
+  return formatResetCountdown(window.resets_at, now).replace(/^resets in /, "");
+}
+
+function usageTier(percent: number) {
+  if (percent >= 90) return "crit";
+  if (percent >= 50) return "hot";
+  return "";
+}
+
+function UsageWindowGroup({ label, window, now }: { label: string; window: ClaudeUsageWindow; now: number }) {
   const percent = Math.max(0, Math.min(100, Math.round(window.used_percentage)));
-  const hot = percent >= 50;
+  const tier = usageTier(percent);
+  const countdown = formatVisibleCountdown(window, now);
 
   return (
-    <div className={`meter ${hot ? "hot" : ""}`}>
-      <span className="w">{label}</span>
-      <div className="bar"><i style={{ width: `${percent}%` }} /></div>
-      <span className="v">
-        <b>{percent}%</b>{" \u00b7 "}{formatResetCountdown(window.resets_at, now)}
-      </span>
+    <div className={`win ${tier}`}>
+      <div className="wtop">
+        <span className="wl">{label}</span>
+        <b className="pct">{percent}%</b>
+        <span className={`cd ${countdown === "resetting" ? "resetting" : ""}`}>{countdown}</span>
+      </div>
+      <div className="fil"><i style={{ width: `${percent}%` }} /></div>
     </div>
+  );
+}
+
+function CompactUsageWindow({ label, window, now }: { label: string; window: ClaudeUsageWindow; now: number }) {
+  const percent = Math.max(0, Math.min(100, Math.round(window.used_percentage)));
+  const tier = usageTier(percent);
+  const countdown = formatVisibleCountdown(window, now);
+
+  return (
+    <span className="cwin">
+      <span>{label}</span>
+      <b className={tier}>{percent}%</b>
+      <span className={`cd ${countdown === "resetting" ? "resetting" : ""}`}>{countdown}</span>
+    </span>
   );
 }
 
@@ -53,25 +81,47 @@ type UsageProviderRow = {
   sevenDay?: ClaudeUsageWindow | null;
 };
 
-function UsageSection({ rows, now, stale }: { rows: UsageProviderRow[]; now: number; stale: boolean }) {
+function UsageSection({
+  rows,
+  now,
+  stale,
+  compact,
+  onToggleCompact,
+}: {
+  rows: UsageProviderRow[];
+  now: number;
+  stale: boolean;
+  compact: boolean;
+  onToggleCompact: () => void;
+}) {
   const visibleRows = rows.filter((row) => row.fiveHour || row.sevenDay);
 
   if (visibleRows.length === 0) return null;
 
   return (
-    <div className={`usage ${stale ? "stale" : ""}`}>
+    <div className={`usage enter ${stale ? "stale" : ""} ${compact ? "compact" : ""}`} onClick={onToggleCompact}>
       {visibleRows.map((row) => (
         <div className="prow" key={row.providerId}>
-          <div className="providerHead">
+          <div className="pid">
             <span className="pglyph" aria-hidden="true">{row.glyph}</span>
-            <span className="pname">{row.providerId}</span>
+            {compact ? null : <span className="pname">{row.providerId}</span>}
           </div>
-          <div className="providerMeters">
-            {row.fiveHour ? <UsageMeter label="5h" window={row.fiveHour} now={now} /> : null}
-            {row.sevenDay ? <UsageMeter label="7d" window={row.sevenDay} now={now} /> : null}
-          </div>
+          {compact ? (
+            <span className="cline">
+              {row.fiveHour ? <CompactUsageWindow label="5h" window={row.fiveHour} now={now} /> : null}
+              {row.fiveHour && row.sevenDay ? <span className="bsep">|</span> : null}
+              {row.sevenDay ? <CompactUsageWindow label="7d" window={row.sevenDay} now={now} /> : null}
+            </span>
+          ) : (
+            <>
+              {row.fiveHour ? <UsageWindowGroup label="5h" window={row.fiveHour} now={now} /> : null}
+              {row.fiveHour && row.sevenDay ? <div className="vsep" /> : null}
+              {row.sevenDay ? <UsageWindowGroup label="7d" window={row.sevenDay} now={now} /> : null}
+            </>
+          )}
         </div>
       ))}
+      <span className="utoggle" aria-hidden="true"><svg width="10" height="10" viewBox="0 0 10 10" fill="none"><path d="M2 4l3 3 3-3" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" /></svg></span>
     </div>
   );
 }
@@ -91,12 +141,17 @@ function aggregateStatus(sessions: Session[]) {
 }
 
 function Panel({ sessions, expanded, now, claudeUsage, onClose, onDismiss }: PanelProps) {
+  const [usageCompact, setUsageCompact] = useState(true);
   const usageRows: UsageProviderRow[] = [
     {
       providerId: "claude",
       glyph: <img src={claudeLogo} alt="" width="14" height="14" style={{ display: "block" }} />,
       fiveHour: claudeUsage?.five_hour,
       sevenDay: claudeUsage?.seven_day,
+    },
+    {
+      providerId: "codex",
+      glyph: <img src={codexLogo} alt="" width="14" height="14" style={{ display: "block" }} />,
     },
   ];
 
@@ -109,7 +164,13 @@ function Panel({ sessions, expanded, now, claudeUsage, onClose, onDismiss }: Pan
         </div>
         <button className="pclose" type="button" onClick={onClose}>esc</button>
       </header>
-      <UsageSection rows={usageRows} now={now} stale={isUsageStale(claudeUsage?.last_updated, now)} />
+      <UsageSection
+        rows={usageRows}
+        now={now}
+        stale={isUsageStale(claudeUsage?.last_updated, now)}
+        compact={usageCompact}
+        onToggleCompact={() => setUsageCompact((current) => !current)}
+      />
 
       <section className="cards" aria-label="Agent sessions">
         {sessions.length === 0 ? (
@@ -131,5 +192,3 @@ function Panel({ sessions, expanded, now, claudeUsage, onClose, onDismiss }: Pan
 }
 
 export default Panel;
-
-
