@@ -72,6 +72,14 @@ function commandText(pending: Session["pending_approval"]) {
   return `${name} ${String(input)}`;
 }
 
+function permissionDescription(pending: Session["pending_approval"]) {
+  if (!pending || pending.kind !== "permission") return null;
+  const input = pending.tool_input;
+  if (!input || typeof input !== "object") return null;
+  const description = (input as Record<string, unknown>).description;
+  return typeof description === "string" && description.trim() ? description : null;
+}
+
 function providerName(session: Session) {
   if (session.agent_type === "claude-code") return "Claude Code";
   if (session.agent_type === "codex") return "Codex";
@@ -381,7 +389,12 @@ function SessionCard({ session, index, now, onDismiss }: SessionCardProps) {
 
   function rowLine() {
     if (session.status === "WaitingForApproval" && pendingPermission) {
-      return <span className="statusword">PERMISSION</span>;
+      const description = permissionDescription(pendingPermission);
+      return (
+        <>
+          <span className="statusword">PERMISSION</span>{description ? ` ${description}` : ""}
+        </>
+      );
     }
     if (showQuestion) {
       const header = (pendingQuestion?.questions ?? demoQuestions()).find((question) => question.header)?.header;

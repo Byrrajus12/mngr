@@ -19,13 +19,25 @@ const STATUS_LINE_SCRIPT_NAME: &str = "claude-statusline.ps1";
 const STATUS_LINE_ORIGINAL_COMMAND_NAME: &str = "claude-statusline-original.txt";
 const MNGR_ORIGINAL_STATUS_LINE_KEY: &str = "_mngrOriginalStatusLine";
 const STATUS_LINE_REFRESH_INTERVAL_MS: u64 = 5000;
+const CODEX_HOOK_SCRIPT_NAME: &str = "codex-hook.ps1";
+const CODEX_EVENTS: &[&str] = &[
+    "SessionStart",
+    "PreToolUse",
+    "PermissionRequest",
+    "PostToolUse",
+    "UserPromptSubmit",
+    "Stop",
+    "SessionEnd",
+];
 const CLAUDE_EVENTS: &[&str] = &[
+    "SessionStart",
     "PreToolUse",
     "PostToolUse",
     "UserPromptSubmit",
     "Stop",
     "Notification",
     "PermissionRequest",
+    "SessionEnd",
 ];
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -33,6 +45,12 @@ pub struct ClaudeHookPayload {
     pub session_id: String,
     pub hook_event_name: String,
     pub cwd: String,
+    #[serde(default)]
+    pub agent_type: Option<String>,
+    #[serde(default)]
+    pub turn_id: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
     #[serde(default)]
     pub wt_session: Option<String>,
     #[serde(default)]
@@ -216,7 +234,18 @@ impl SessionManager {
         session.last_event_at = now;
 
         match payload.hook_event_name.as_str() {
-            "SessionStart" | "UserPromptSubmit" => {
+            "SessionStart" => {
+                eprintln!(
+                    "mngr apply_event: clearing pending_approval event={} session_id={} target_found={} had_pending={}",
+                    payload.hook_event_name,
+                    payload.session_id,
+                    session_existed,
+                    session.pending_approval.is_some()
+                );
+                session.status = SessionStatus::Idle;
+                session.pending_approval = None;
+            }
+            "UserPromptSubmit" => {
                 eprintln!(
                     "mngr apply_event: clearing pending_approval event={} session_id={} target_found={} had_pending={}",
                     payload.hook_event_name,
@@ -310,6 +339,18 @@ impl SessionManager {
                 session.current_tool = None;
                 session.pending_approval = None;
             }
+            "SessionEnd" => {
+                eprintln!(
+                    "mngr apply_event: clearing pending_approval event={} session_id={} target_found={} had_pending={}",
+                    payload.hook_event_name,
+                    payload.session_id,
+                    session_existed,
+                    session.pending_approval.is_some()
+                );
+                session.status = SessionStatus::Done;
+                session.current_tool = None;
+                session.pending_approval = None;
+            }
             _ => {}
         }
 
@@ -369,7 +410,8 @@ impl SessionManager {
         let mut changed = false;
 
         for session in self.sessions.values_mut() {
-            if session.status != SessionStatus::WaitingForApproval {
+            if session.status != SessionStatus::WaitingForApproval || session.agent_type == "codex"
+            {
                 continue;
             }
 
@@ -434,7 +476,11 @@ impl Session {
         Self {
             session_id: payload.session_id.clone(),
             desktop_session_uuid: None,
-            agent_type: "claude-code".to_string(),
+            agent_type: if payload.agent_type.as_deref() == Some("codex") {
+                "codex".to_string()
+            } else {
+                "claude-code".to_string()
+            },
             status: SessionStatus::Working,
             project_path: payload.cwd.clone(),
             project_name: project_name(&payload.cwd),
@@ -861,6 +907,7 @@ fn emit_sessions(app: &tauri::AppHandle, sessions: Vec<Session>) {
 
 fn update_sessions(app: &tauri::AppHandle, payload: ClaudeHookPayload) {
     let session_id = payload.session_id.clone();
+    let is_codex = payload.agent_type.as_deref() == Some("codex");
     let (sessions, inserted, store) = {
         let store = app.state::<SessionStore>();
         let store = store.0.clone();
@@ -871,7 +918,7 @@ fn update_sessions(app: &tauri::AppHandle, payload: ClaudeHookPayload) {
     };
 
     emit_sessions(app, sessions);
-    if inserted {
+    if inserted && !is_codex {
         resolve_desktop_session_uuid_in_background(app.clone(), store, session_id);
     }
 }
@@ -1096,25 +1143,31 @@ fn jump_to_claude_desktop_session(_session_id: String) -> Result<(), String> {
 #[cfg(windows)]
 #[tauri::command]
 fn jump_to_session(store: State<'_, SessionStore>, session_id: String) -> Result<(), String> {
-    let cached_desktop_uuid = {
+    let (cached_desktop_uuid, is_codex) = {
         let manager = store.0.lock().expect("session manager mutex poisoned");
-        manager
-            .sessions
-            .get(&session_id)
-            .and_then(|session| session.desktop_session_uuid.clone())
-    };
-    if let Some(desktop_uuid) = cached_desktop_uuid {
-        return open_claude_resume_deep_link(&desktop_uuid);
-    }
-
-    if let Some(desktop_uuid) = find_claude_desktop_session_uuid(&session_id) {
-        {
-            let mut manager = store.0.lock().expect("session manager mutex poisoned");
-            if let Some(session) = manager.sessions.get_mut(&session_id) {
-                session.desktop_session_uuid = Some(desktop_uuid.clone());
-            }
+        match manager.sessions.get(&session_id) {
+            Some(session) => (
+                session.desktop_session_uuid.clone(),
+                session.agent_type == "codex",
+            ),
+            None => (None, false),
         }
-        return open_claude_resume_deep_link(&desktop_uuid);
+    };
+
+    if !is_codex {
+        if let Some(desktop_uuid) = cached_desktop_uuid {
+            return open_claude_resume_deep_link(&desktop_uuid);
+        }
+
+        if let Some(desktop_uuid) = find_claude_desktop_session_uuid(&session_id) {
+            {
+                let mut manager = store.0.lock().expect("session manager mutex poisoned");
+                if let Some(session) = manager.sessions.get_mut(&session_id) {
+                    session.desktop_session_uuid = Some(desktop_uuid.clone());
+                }
+            }
+            return open_claude_resume_deep_link(&desktop_uuid);
+        }
     }
 
     jump_to_terminal(store, session_id)
@@ -1163,6 +1216,11 @@ fn jump_to_terminal(_store: State<'_, SessionStore>, _session_id: String) -> Res
 #[tauri::command]
 fn install_claude_hooks() -> Result<String, String> {
     install_claude_hooks_inner().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn install_codex_hooks() -> Result<String, String> {
+    install_codex_hooks_inner().map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -1259,6 +1317,56 @@ fn install_claude_hooks_inner() -> Result<String, InstallError> {
     Ok(settings_path.display().to_string())
 }
 
+fn install_codex_hooks_inner() -> Result<String, InstallError> {
+    let home_dir = std::env::var_os("USERPROFILE")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+        .ok_or(InstallError::MissingHomeDir)?;
+
+    let settings_dir = home_dir.join(".codex");
+    let hooks_path = settings_dir.join("hooks.json");
+    let mngr_dir = settings_dir.join("mngr");
+    install_codex_hooks_at(&hooks_path, &mngr_dir)?;
+    Ok(format!(
+        "Installed Codex hooks at {}. Trust the mngr hooks in Codex with /hooks, or launch Codex with --dangerously-bypass-hook-trust.",
+        hooks_path.display()
+    ))
+}
+
+fn install_codex_hooks_at(hooks_path: &Path, mngr_dir: &Path) -> Result<(), InstallError> {
+    let hook_script = mngr_dir.join(CODEX_HOOK_SCRIPT_NAME);
+    fs::create_dir_all(mngr_dir)?;
+    write_if_changed(
+        &hook_script,
+        include_str!("../../scripts/codex-hook.ps1").as_bytes(),
+    )?;
+
+    let mut settings = load_json_object(hooks_path)?;
+    let original_settings = settings.clone();
+    let settings_object = settings
+        .as_object_mut()
+        .ok_or_else(|| InstallError::InvalidSettingsShape(hooks_path.to_path_buf()))?;
+
+    let hooks_value = settings_object.entry("hooks").or_insert_with(|| json!({}));
+    let hooks_object = hooks_value
+        .as_object_mut()
+        .ok_or(InstallError::InvalidHooksShape)?;
+
+    let command = "bash ~/.codex/mngr/codex-hook.sh";
+    let command_windows = powershell_file_command(&hook_script);
+    for event_name in CODEX_EVENTS {
+        append_codex_hook_group(hooks_object, event_name, command, &command_windows);
+    }
+
+    if settings != original_settings {
+        write_if_changed(
+            hooks_path,
+            (serde_json::to_string_pretty(&settings)? + "\n").as_bytes(),
+        )?;
+    }
+
+    Ok(())
+}
 fn install_claude_hooks_at(settings_path: &Path, mngr_dir: &Path) -> Result<(), InstallError> {
     let hook_script = mngr_dir.join("claude-hook.ps1");
     let status_line_script = mngr_dir.join(STATUS_LINE_SCRIPT_NAME);
@@ -1442,6 +1550,95 @@ fn hook_group_for(event_name: &str, command: &str) -> Value {
     Value::Object(group)
 }
 
+fn append_codex_hook_group(
+    hooks_object: &mut serde_json::Map<String, Value>,
+    event_name: &str,
+    command: &str,
+    command_windows: &str,
+) {
+    let group = codex_hook_group_for(event_name, command, command_windows);
+    let event_hooks = hooks_object
+        .entry(event_name.to_string())
+        .or_insert_with(|| Value::Array(Vec::new()));
+
+    if let Some(groups) = event_hooks.as_array_mut() {
+        if !groups
+            .iter_mut()
+            .any(|existing| ensure_codex_hook_group(existing, event_name, command, command_windows))
+        {
+            groups.push(group);
+        }
+    } else {
+        hooks_object.insert(event_name.to_string(), Value::Array(vec![group]));
+    }
+}
+
+fn ensure_codex_hook_group(
+    group: &mut Value,
+    event_name: &str,
+    command: &str,
+    command_windows: &str,
+) -> bool {
+    group
+        .get_mut("hooks")
+        .and_then(Value::as_array_mut)
+        .map(|hooks| {
+            let mut matched = false;
+            for hook in hooks {
+                let is_mngr_codex_hook = hook.get("type").and_then(Value::as_str)
+                    == Some("command")
+                    && hook
+                        .get("commandWindows")
+                        .and_then(Value::as_str)
+                        .is_some_and(|current| {
+                            current == command_windows || current.contains(CODEX_HOOK_SCRIPT_NAME)
+                        });
+                if is_mngr_codex_hook {
+                    if let Some(object) = hook.as_object_mut() {
+                        object.insert("command".to_string(), json!(command));
+                        object.insert("commandWindows".to_string(), json!(command_windows));
+                        object.insert(
+                            "timeoutSec".to_string(),
+                            json!(codex_hook_timeout_sec(event_name)),
+                        );
+                        object.insert("async".to_string(), json!(codex_hook_async(event_name)));
+                        object.insert("statusMessage".to_string(), json!("mngr"));
+                    }
+                    matched = true;
+                }
+            }
+            matched
+        })
+        .unwrap_or(false)
+}
+
+fn codex_hook_group_for(event_name: &str, command: &str, command_windows: &str) -> Value {
+    json!({
+        "matcher": null,
+        "hooks": [
+            {
+                "type": "command",
+                "command": command,
+                "commandWindows": command_windows,
+                "timeoutSec": codex_hook_timeout_sec(event_name),
+                "async": codex_hook_async(event_name),
+                "statusMessage": "mngr"
+            }
+        ]
+    })
+}
+
+fn codex_hook_timeout_sec(event_name: &str) -> u64 {
+    if event_name == "PermissionRequest" {
+        300
+    } else {
+        10
+    }
+}
+
+fn codex_hook_async(_event_name: &str) -> bool {
+    false
+}
 fn local_app_data_dir() -> PathBuf {
     std::env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
@@ -1608,6 +1805,9 @@ pub fn run() {
             if let Err(error) = install_claude_hooks_inner() {
                 eprintln!("failed to install Claude Code integration: {error}");
             }
+            if let Err(error) = install_codex_hooks_inner() {
+                eprintln!("failed to install Codex integration: {error}");
+            }
             position_overlay_window(app.handle());
             start_pipe_listener(app.handle().clone());
             start_session_cleanup(app.handle().clone());
@@ -1618,6 +1818,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_sessions,
             install_claude_hooks,
+            install_codex_hooks,
             get_claude_usage,
             jump_to_claude_desktop_session,
             jump_to_session,
@@ -1909,6 +2110,9 @@ mod tests {
             session_id: "session-1".to_string(),
             hook_event_name: "PreToolUse".to_string(),
             cwd: "C:\\work\\project".to_string(),
+            agent_type: None,
+            turn_id: None,
+            model: None,
             wt_session: Some("wt-session-1".to_string()),
             hook_pid: Some(4242),
             shell_pid: Some(5151),
@@ -1928,6 +2132,9 @@ mod tests {
             session_id: "session-1".to_string(),
             hook_event_name: "PermissionRequest".to_string(),
             cwd: "C:\\work\\project".to_string(),
+            agent_type: None,
+            turn_id: None,
+            model: None,
             wt_session: Some("wt-session-1".to_string()),
             hook_pid: Some(4242),
             shell_pid: Some(5151),
@@ -1958,6 +2165,9 @@ mod tests {
             session_id: "session-1".to_string(),
             hook_event_name: hook_event_name.to_string(),
             cwd: "C:\\work\\project".to_string(),
+            agent_type: None,
+            turn_id: None,
+            model: None,
             wt_session: Some("wt-session-1".to_string()),
             hook_pid: Some(4242),
             shell_pid: Some(5151),
@@ -2086,6 +2296,18 @@ mod tests {
     }
 
     #[test]
+    fn session_end_after_pending_approval_marks_done_and_clears_card() {
+        let mut manager = SessionManager::default();
+        manager.apply_event(permission_request_payload("req-session-end"));
+
+        let sessions = manager.apply_event(session_event_payload("SessionEnd"));
+
+        assert_eq!(sessions[0].status, SessionStatus::Done);
+        assert!(sessions[0].current_tool.is_none());
+        assert!(sessions[0].pending_approval.is_none());
+    }
+
+    #[test]
     fn user_prompt_after_pending_approval_clears_card() {
         let mut manager = SessionManager::default();
         manager.apply_event(permission_request_payload("req-prompt"));
@@ -2093,6 +2315,17 @@ mod tests {
         let sessions = manager.apply_event(session_event_payload("UserPromptSubmit"));
 
         assert_eq!(sessions[0].status, SessionStatus::Working);
+        assert!(sessions[0].pending_approval.is_none());
+    }
+
+    #[test]
+    fn session_start_after_pending_approval_marks_idle_and_clears_card() {
+        let mut manager = SessionManager::default();
+        manager.apply_event(permission_request_payload("req-session-start"));
+
+        let sessions = manager.apply_event(session_event_payload("SessionStart"));
+
+        assert_eq!(sessions[0].status, SessionStatus::Idle);
         assert!(sessions[0].pending_approval.is_none());
     }
 
