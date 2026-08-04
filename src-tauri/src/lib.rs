@@ -1,4 +1,4 @@
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use similar::TextDiff;
@@ -185,6 +185,77 @@ impl ClaudeUsageState {
             last_updated: None,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OAuthCredentials {
+    #[serde(alias = "accessToken")]
+    access_token: String,
+    #[serde(alias = "expiresAt")]
+    expires_at: Option<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ClaudeCredentialsFile {
+    #[serde(flatten)]
+    root: BTreeMap<String, Value>,
+    #[serde(rename = "claudeAiOauth")]
+    claude_ai_oauth: Option<OAuthCredentials>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OAuthUsageWindow {
+    #[serde(rename = "used_percentage", alias = "utilization")]
+    used_percentage: f64,
+    resets_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OAuthUsageCache {
+    five_hour: Option<OAuthUsageWindow>,
+    seven_day: Option<OAuthUsageWindow>,
+    last_updated: String,
+}
+
+impl OAuthUsageCache {
+    fn to_claude_usage_state(&self) -> ClaudeUsageState {
+        ClaudeUsageState {
+            five_hour: self
+                .five_hour
+                .as_ref()
+                .map(OAuthUsageWindow::to_claude_window),
+            seven_day: self
+                .seven_day
+                .as_ref()
+                .map(OAuthUsageWindow::to_claude_window),
+            last_updated: parse_cache_last_updated(&Value::String(self.last_updated.clone())),
+        }
+    }
+}
+
+impl OAuthUsageWindow {
+    fn to_claude_window(&self) -> ClaudeUsageWindow {
+        ClaudeUsageWindow {
+            used_percentage: self.used_percentage,
+            resets_at: self
+                .resets_at
+                .as_ref()
+                .and_then(|value| reset_time_ms(&Value::String(value.clone()))),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Default, PartialEq)]
+pub struct CodexUsageWindow {
+    pub used_percentage: f64,
+    pub resets_at: Option<String>,
+    pub window_label: String,
+}
+
+#[derive(Debug, Clone, Serialize, Default, PartialEq)]
+pub struct CodexUsageState {
+    pub windows: Vec<CodexUsageWindow>,
+    pub last_updated: Option<String>,
 }
 
 #[derive(Default)]
@@ -1229,6 +1300,11 @@ fn get_claude_usage() -> Result<ClaudeUsageState, String> {
 }
 
 #[tauri::command]
+fn get_codex_usage() -> Result<CodexUsageState, String> {
+    read_codex_usage_from_transcripts().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn resolve_approval(
     app: tauri::AppHandle,
     store: State<'_, SessionStore>,
@@ -1660,16 +1736,347 @@ fn read_claude_usage_cache(path: &Path) -> Result<ClaudeUsageState, std::io::Err
 
     let contents = fs::read_to_string(path)?;
     let payload = serde_json::from_str::<Value>(&contents).unwrap_or(Value::Null);
-    let last_updated = fs::metadata(path)
-        .and_then(|metadata| metadata.modified())
-        .ok()
-        .and_then(system_time_ms);
 
     Ok(ClaudeUsageState {
         five_hour: parse_usage_window(payload.get("five_hour")),
         seven_day: parse_usage_window(payload.get("seven_day")),
-        last_updated,
+        last_updated: payload
+            .get("last_updated")
+            .and_then(parse_cache_last_updated),
     })
+}
+
+fn read_oauth_token() -> Option<String> {
+    let Some(home_dir) = std::env::var_os("USERPROFILE").map(PathBuf::from) else {
+        eprintln!("mngr oauth: USERPROFILE is not set");
+        return None;
+    };
+    read_oauth_token_at(&home_dir.join(".claude").join(".credentials.json"))
+}
+
+fn read_oauth_token_at(path: &Path) -> Option<String> {
+    let contents = match fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            eprintln!(
+                "mngr oauth: credentials file not found at {}",
+                path.display()
+            );
+            return None;
+        }
+        Err(error) => {
+            eprintln!(
+                "mngr oauth: failed to read credentials at {}: {error}",
+                path.display()
+            );
+            return None;
+        }
+    };
+    let value = match serde_json::from_str::<Value>(&contents) {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("mngr oauth: failed to parse credentials: {error}");
+            return None;
+        }
+    };
+    let Some(credentials) = oauth_credentials_from_value(&value) else {
+        eprintln!("mngr oauth: failed to parse credentials: missing claudeAiOauth.accessToken");
+        return None;
+    };
+    if oauth_credentials_expired(&credentials) {
+        eprintln!("mngr oauth: token expired");
+        return None;
+    }
+    if let Some(minutes) = oauth_credentials_expires_in_minutes(&credentials) {
+        eprintln!("mngr oauth: token found, expires in {minutes}m");
+    } else {
+        eprintln!("mngr oauth: token found, expires in unknown");
+    }
+    Some(credentials.access_token)
+}
+
+fn oauth_credentials_from_value(value: &Value) -> Option<OAuthCredentials> {
+    serde_json::from_value::<ClaudeCredentialsFile>(value.clone())
+        .ok()
+        .and_then(|file| {
+            file.claude_ai_oauth.or_else(|| {
+                serde_json::from_value::<OAuthCredentials>(Value::Object(
+                    file.root.into_iter().collect(),
+                ))
+                .ok()
+            })
+        })
+}
+
+fn oauth_credentials_expired(credentials: &OAuthCredentials) -> bool {
+    let Some(expires_at) = credentials.expires_at.as_ref() else {
+        return false;
+    };
+    oauth_expires_at_ms(expires_at)
+        .map(|expires_ms| expires_ms <= now_ms())
+        .unwrap_or(true)
+}
+
+fn oauth_credentials_expires_in_minutes(credentials: &OAuthCredentials) -> Option<u64> {
+    let expires_at = oauth_expires_at_ms(credentials.expires_at.as_ref()?)?;
+    Some(expires_at.saturating_sub(now_ms()) / 60000)
+}
+
+fn oauth_expires_at_ms(expires_at: &Value) -> Option<u64> {
+    parse_cache_last_updated(expires_at)
+}
+
+fn fetch_oauth_usage(token: &str) -> Result<OAuthUsageCache, Box<dyn std::error::Error>> {
+    let client = reqwest::blocking::Client::builder()
+        .user_agent("mngr/1.0")
+        .build()?;
+    let response = client
+        .get("https://api.anthropic.com/api/oauth/usage")
+        .bearer_auth(token)
+        .header("anthropic-beta", "oauth-2025-04-20")
+        .send()?
+        .error_for_status()?;
+    let payload = response.json::<Value>()?;
+    parse_oauth_usage_payload(&payload).ok_or_else(|| "invalid OAuth usage response".into())
+}
+
+fn parse_oauth_usage_payload(payload: &Value) -> Option<OAuthUsageCache> {
+    let mut cache = OAuthUsageCache {
+        five_hour: payload
+            .get("five_hour")
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok()),
+        seven_day: payload
+            .get("seven_day")
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok()),
+        last_updated: now_ms().to_string(),
+    };
+    if cache.five_hour.is_none() && cache.seven_day.is_none() {
+        return None;
+    }
+    if cache.last_updated.is_empty() {
+        cache.last_updated = now_ms().to_string();
+    }
+    Some(cache)
+}
+
+fn write_oauth_usage_cache(cache: &OAuthUsageCache) -> std::io::Result<()> {
+    let cache_path = claude_usage_cache_path();
+    if let Some(parent) = cache_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let json = serde_json::to_string_pretty(cache).map_err(std::io::Error::other)?;
+    fs::write(cache_path, json)
+}
+
+fn start_oauth_usage_poller(app: tauri::AppHandle) {
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(5));
+
+        loop {
+            eprintln!("mngr oauth: checking staleness");
+            let has_active_claude_sessions = {
+                let store = app.state::<SessionStore>();
+                let manager = store.0.lock().expect("session manager mutex poisoned");
+                manager.sessions.values().any(|session| {
+                    session.agent_type == "claude-code"
+                        && session.status != SessionStatus::Done
+                        && session.status != SessionStatus::Idle
+                })
+            };
+
+            let usage_is_stale = match read_claude_usage_cache(&claude_usage_cache_path()) {
+                Ok(state) => state
+                    .last_updated
+                    .map(|updated_ms| now_ms().saturating_sub(updated_ms) > 10 * 60 * 1000)
+                    .unwrap_or(true),
+                Err(_) => true,
+            };
+
+            if has_active_claude_sessions {
+                eprintln!("mngr oauth: skipping, active claude sessions");
+            } else if usage_is_stale {
+                eprintln!("mngr oauth: fetching, data is stale");
+                if let Some(token) = read_oauth_token() {
+                    match fetch_oauth_usage(&token) {
+                        Ok(cache) => match write_oauth_usage_cache(&cache) {
+                            Ok(()) => {
+                                let state = cache.to_claude_usage_state();
+                                let five_hour = state
+                                    .five_hour
+                                    .as_ref()
+                                    .map(|window| window.used_percentage)
+                                    .unwrap_or(0.0);
+                                let seven_day = state
+                                    .seven_day
+                                    .as_ref()
+                                    .map(|window| window.used_percentage)
+                                    .unwrap_or(0.0);
+                                eprintln!(
+                                    "mngr oauth: updated cache, five_hour={five_hour}% seven_day={seven_day}%"
+                                );
+                                let _ = app.emit("claude-usage-updated", &state);
+                            }
+                            Err(error) => {
+                                eprintln!("mngr oauth: failed: {error}");
+                            }
+                        },
+                        Err(error) => {
+                            eprintln!("mngr oauth: failed: {error}");
+                        }
+                    }
+                } else {
+                    eprintln!("mngr oauth: no credentials found");
+                }
+            }
+
+            std::thread::sleep(std::time::Duration::from_secs(10 * 60));
+        }
+    });
+}
+
+fn read_codex_usage_from_transcripts() -> Result<CodexUsageState, std::io::Error> {
+    let Some(base_path) = std::env::var_os("USERPROFILE")
+        .map(PathBuf::from)
+        .map(|home| home.join(".codex").join("sessions"))
+    else {
+        return Ok(CodexUsageState::default());
+    };
+
+    read_codex_usage_from_transcripts_at(&base_path, SystemTime::now())
+}
+
+fn read_codex_usage_from_transcripts_at(
+    base_path: &Path,
+    now: SystemTime,
+) -> Result<CodexUsageState, std::io::Error> {
+    let today: DateTime<Utc> = now.into();
+    let candidate_days = [today, today - ChronoDuration::days(1)];
+
+    for day in candidate_days {
+        let day_path = base_path
+            .join(day.format("%Y").to_string())
+            .join(day.format("%m").to_string())
+            .join(day.format("%d").to_string());
+        if !day_path.exists() {
+            continue;
+        }
+
+        let mut transcripts = fs::read_dir(&day_path)?
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                let path = entry.path();
+                let file_name = path.file_name()?.to_str()?;
+                if !file_name.starts_with("rollout-") || !file_name.ends_with(".jsonl") {
+                    return None;
+                }
+                let modified = entry
+                    .metadata()
+                    .and_then(|metadata| metadata.modified())
+                    .unwrap_or(UNIX_EPOCH);
+                Some((path, modified))
+            })
+            .collect::<Vec<_>>();
+
+        transcripts.sort_by(|left, right| right.1.cmp(&left.1));
+
+        for (path, _) in transcripts.into_iter().take(5) {
+            if let Some(usage) = parse_latest_codex_usage_file(&path)? {
+                return Ok(usage);
+            }
+        }
+
+        return Ok(CodexUsageState::default());
+    }
+
+    Ok(CodexUsageState::default())
+}
+
+fn parse_latest_codex_usage_file(path: &Path) -> Result<Option<CodexUsageState>, std::io::Error> {
+    let contents = fs::read_to_string(path)?;
+    for line in contents.lines().rev() {
+        if !line.contains("token_count") || !line.contains("rate_limits") {
+            continue;
+        }
+
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if let Some(usage) = parse_codex_usage_entry(&value) {
+            return Ok(Some(usage));
+        }
+    }
+
+    Ok(None)
+}
+
+fn parse_codex_usage_entry(value: &Value) -> Option<CodexUsageState> {
+    let payload = value.get("payload")?;
+    if payload.get("type").and_then(Value::as_str) != Some("token_count") {
+        return None;
+    }
+
+    let rate_limits = payload.get("rate_limits")?;
+    let mut windows = Vec::new();
+    for slot in ["primary", "secondary"] {
+        if let Some(window) = parse_codex_usage_window(rate_limits.get(slot)) {
+            upsert_codex_usage_window(&mut windows, window);
+        }
+    }
+
+    if windows.is_empty() {
+        return None;
+    }
+
+    Some(CodexUsageState {
+        windows,
+        last_updated: value
+            .get("timestamp")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+    })
+}
+
+fn parse_codex_usage_window(value: Option<&Value>) -> Option<CodexUsageWindow> {
+    let object = value?.as_object()?;
+    let used_percentage = number_value(object.get("used_percent"))?;
+    let window_minutes = object.get("window_minutes")?.as_u64()?;
+    Some(CodexUsageWindow {
+        used_percentage,
+        resets_at: object
+            .get("resets_at")
+            .and_then(Value::as_i64)
+            .and_then(epoch_seconds_to_iso8601),
+        window_label: codex_window_label(window_minutes),
+    })
+}
+
+fn upsert_codex_usage_window(windows: &mut Vec<CodexUsageWindow>, window: CodexUsageWindow) {
+    if let Some(existing) = windows
+        .iter_mut()
+        .find(|existing| existing.window_label == window.window_label)
+    {
+        if window.used_percentage > existing.used_percentage {
+            *existing = window;
+        }
+        return;
+    }
+
+    windows.push(window);
+}
+
+fn codex_window_label(minutes: u64) -> String {
+    match minutes {
+        300 => "5h".to_string(),
+        10080 => "7d".to_string(),
+        43200 => "30d".to_string(),
+        other => format!("{other}m"),
+    }
+}
+
+fn epoch_seconds_to_iso8601(seconds: i64) -> Option<String> {
+    DateTime::<Utc>::from_timestamp(seconds, 0).map(|date| date.to_rfc3339())
 }
 
 fn parse_usage_window(value: Option<&Value>) -> Option<ClaudeUsageWindow> {
@@ -1707,17 +2114,39 @@ fn reset_time_ms(value: &Value) -> Option<u64> {
     }
 }
 
+fn parse_cache_last_updated(value: &Value) -> Option<u64> {
+    match value {
+        Value::Number(number) => number.as_f64().and_then(timestamp_number_to_ms),
+        Value::String(text) => text
+            .parse::<f64>()
+            .ok()
+            .and_then(timestamp_number_to_ms)
+            .or_else(|| {
+                DateTime::parse_from_rfc3339(text)
+                    .ok()
+                    .map(|date| date.with_timezone(&Utc).timestamp_millis())
+                    .and_then(|ms| u64::try_from(ms).ok())
+            }),
+        _ => None,
+    }
+}
+
+fn timestamp_number_to_ms(value: f64) -> Option<u64> {
+    if !value.is_finite() || value < 0.0 {
+        return None;
+    }
+    if value > 10_000_000_000.0 {
+        Some(value.round() as u64)
+    } else {
+        seconds_to_ms(value)
+    }
+}
+
 fn seconds_to_ms(seconds: f64) -> Option<u64> {
     if !seconds.is_finite() || seconds < 0.0 {
         return None;
     }
     Some((seconds * 1000.0).round() as u64)
-}
-
-fn system_time_ms(time: SystemTime) -> Option<u64> {
-    time.duration_since(UNIX_EPOCH)
-        .ok()
-        .map(|duration| duration.as_millis() as u64)
 }
 
 fn write_approval_response(
@@ -1810,6 +2239,7 @@ pub fn run() {
             }
             position_overlay_window(app.handle());
             start_pipe_listener(app.handle().clone());
+            start_oauth_usage_poller(app.handle().clone());
             start_session_cleanup(app.handle().clone());
             start_transcript_watcher(app.handle().clone());
             start_cursor_watcher(app.handle().clone());
@@ -1820,6 +2250,7 @@ pub fn run() {
             install_claude_hooks,
             install_codex_hooks,
             get_claude_usage,
+            get_codex_usage,
             jump_to_claude_desktop_session,
             jump_to_session,
             jump_to_terminal,
@@ -2523,7 +2954,29 @@ mod tests {
             usage.seven_day.as_ref().unwrap().resets_at,
             Some(expected_iso)
         );
-        assert!(usage.last_updated.is_some());
+        assert!(usage.last_updated.is_none());
+    }
+
+    #[test]
+    fn claude_usage_cache_reads_last_updated_when_present() {
+        let dir = test_dir("claude-usage-last-updated");
+        let path = dir.join("claude-usage.json");
+        fs::write(
+            &path,
+            json!({
+                "five_hour": {
+                    "used_percentage": 59,
+                    "resets_at": 1785102600
+                },
+                "last_updated": "1785882150834"
+            })
+            .to_string(),
+        )
+        .expect("write usage cache");
+
+        let usage = read_claude_usage_cache(&path).expect("read usage cache");
+
+        assert_eq!(usage.last_updated, Some(1_785_882_150_834));
     }
 
     #[test]
@@ -2533,6 +2986,196 @@ mod tests {
         let usage = read_claude_usage_cache(&dir.join("missing.json")).expect("read missing usage");
 
         assert_eq!(usage, ClaudeUsageState::empty());
+    }
+
+    #[test]
+    fn oauth_token_reader_accepts_root_and_nested_credentials() {
+        let dir = test_dir("oauth-token-reader");
+        let root_path = dir.join("root.json");
+        let nested_path = dir.join("nested.json");
+        let future_expiry = (now_ms() + 60_000).to_string();
+        fs::write(
+            &root_path,
+            json!({
+                "accessToken": "root-token",
+                "expiresAt": future_expiry
+            })
+            .to_string(),
+        )
+        .expect("write root credentials");
+        fs::write(
+            &nested_path,
+            json!({
+                "claudeAiOauth": {
+                    "accessToken": "nested-token"
+                }
+            })
+            .to_string(),
+        )
+        .expect("write nested credentials");
+
+        assert_eq!(
+            read_oauth_token_at(&root_path).as_deref(),
+            Some("root-token")
+        );
+        assert_eq!(
+            read_oauth_token_at(&nested_path).as_deref(),
+            Some("nested-token")
+        );
+    }
+
+    #[test]
+    fn oauth_token_reader_accepts_actual_nested_millisecond_expiry_shape() {
+        let dir = test_dir("oauth-token-actual-shape");
+        let credentials_path = dir.join("credentials.json");
+        let future_expiry = now_ms() + 60 * 60 * 1000;
+        fs::write(
+            &credentials_path,
+            json!({
+                "claudeAiOauth": {
+                    "accessToken": "token-value",
+                    "refreshToken": "refresh-value",
+                    "expiresAt": future_expiry,
+                    "refreshTokenExpiresAt": future_expiry + 24 * 60 * 60 * 1000,
+                    "scopes": ["user:inference"],
+                    "subscriptionType": "pro",
+                    "rateLimitTier": "default_claude_ai"
+                },
+                "organizationUuid": "org-id"
+            })
+            .to_string(),
+        )
+        .expect("write actual-shaped credentials");
+
+        assert_eq!(
+            read_oauth_token_at(&credentials_path).as_deref(),
+            Some("token-value")
+        );
+    }
+
+    #[test]
+    fn oauth_token_reader_rejects_expired_credentials() {
+        let dir = test_dir("oauth-expired-token");
+        let credentials_path = dir.join("credentials.json");
+        fs::write(
+            &credentials_path,
+            json!({
+                "claudeAiOauth": {
+                    "accessToken": "old-token",
+                    "expiresAt": "2000-01-01T00:00:00Z"
+                }
+            })
+            .to_string(),
+        )
+        .expect("write expired credentials");
+
+        assert!(read_oauth_token_at(&credentials_path).is_none());
+    }
+
+    #[test]
+    fn oauth_usage_payload_parses_expected_windows() {
+        let payload = json!({
+            "five_hour": {
+                "utilization": 45.5,
+                "resets_at": "2026-08-05T00:20:00.500359+00:00"
+            },
+            "seven_day": {
+                "used_percentage": 12.0,
+                "resets_at": "2026-02-09T12:00:00.462679+00:00"
+            }
+        });
+
+        let cache = parse_oauth_usage_payload(&payload).expect("parse oauth usage");
+        let usage = cache.to_claude_usage_state();
+
+        assert_eq!(usage.five_hour.as_ref().unwrap().used_percentage, 45.5);
+        assert_eq!(cache.five_hour.as_ref().unwrap().used_percentage, 45.5);
+        assert_eq!(
+            cache.five_hour.as_ref().unwrap().resets_at.as_deref(),
+            Some("2026-08-05T00:20:00.500359+00:00")
+        );
+        assert_eq!(
+            usage.five_hour.as_ref().unwrap().resets_at,
+            Some(
+                DateTime::parse_from_rfc3339("2026-08-05T00:20:00.500359+00:00")
+                    .unwrap()
+                    .timestamp_millis() as u64
+            )
+        );
+        assert_eq!(usage.seven_day.as_ref().unwrap().used_percentage, 12.0);
+        assert!(usage.last_updated.is_some());
+    }
+
+    #[test]
+    fn codex_usage_transcripts_parse_latest_rate_limit_windows() {
+        let dir = test_dir("codex-usage-transcripts");
+        let day_dir = dir.join("2026").join("08").join("04");
+        fs::create_dir_all(&day_dir).expect("create codex day dir");
+        let transcript_path = day_dir.join("rollout-2026-08-04T21-01-39-session-id.jsonl");
+        fs::write(
+            &transcript_path,
+            [
+                json!({
+                    "timestamp": "2026-08-04T20:00:00.000Z",
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "token_count",
+                        "rate_limits": {
+                            "primary": {
+                                "used_percent": 10,
+                                "window_minutes": 300,
+                                "resets_at": 1786230000
+                            },
+                            "secondary": null
+                        }
+                    }
+                })
+                .to_string(),
+                json!({
+                    "timestamp": "2026-08-04T21:01:39.574Z",
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "token_count",
+                        "rate_limits": {
+                            "primary": {
+                                "used_percent": 73.0,
+                                "window_minutes": 10080,
+                                "resets_at": 1786231949
+                            },
+                            "secondary": {
+                                "used_percent": 82.5,
+                                "window_minutes": 10080,
+                                "resets_at": 1786232000
+                            }
+                        }
+                    }
+                })
+                .to_string(),
+            ]
+            .join("\n"),
+        )
+        .expect("write codex transcript");
+
+        let now_seconds = DateTime::parse_from_rfc3339("2026-08-04T22:00:00Z")
+            .unwrap()
+            .timestamp() as u64;
+        let usage = read_codex_usage_from_transcripts_at(
+            &dir,
+            UNIX_EPOCH + std::time::Duration::from_secs(now_seconds),
+        )
+        .expect("read codex usage transcripts");
+
+        assert_eq!(
+            usage.last_updated.as_deref(),
+            Some("2026-08-04T21:01:39.574Z")
+        );
+        assert_eq!(usage.windows.len(), 1);
+        assert_eq!(usage.windows[0].window_label, "7d");
+        assert_eq!(usage.windows[0].used_percentage, 82.5);
+        assert_eq!(
+            usage.windows[0].resets_at.as_deref(),
+            Some("2026-08-08T23:33:20+00:00")
+        );
     }
 
     #[test]

@@ -1,8 +1,8 @@
-import type { ReactNode } from "react";
+import { Fragment, type ReactNode } from "react";
 import { useState } from "react";
 import claudeLogo from "../assets/providers/claude.svg";
 import codexLogo from "../assets/providers/codex.svg";
-import type { ClaudeUsageState, ClaudeUsageWindow, Session } from "../types";
+import type { ClaudeUsageState, CodexUsageState, Session } from "../types";
 import SessionCard from "./SessionCard";
 
 type PanelProps = {
@@ -10,13 +10,37 @@ type PanelProps = {
   expanded: boolean;
   now: number;
   claudeUsage: ClaudeUsageState | null;
+  codexUsage: CodexUsageState | null;
   onClose: () => void;
   onDismiss: (id: string) => void;
 };
 
-function formatResetCountdown(resetsAt: number | null | undefined, now: number) {
-  if (!resetsAt) return "reset unknown";
-  const remainingMs = resetsAt - now;
+type UsageDisplayWindow = {
+  label: string;
+  used_percentage: number;
+  resets_at?: number | string | null;
+};
+
+type UsageProviderRow = {
+  providerId: string;
+  glyph: ReactNode;
+  windows: UsageDisplayWindow[];
+  lastUpdated?: number | string | null;
+};
+
+function timestampMs(value: number | string | null | undefined) {
+  if (typeof value === "number") return value;
+  if (typeof value === "string") {
+    const parsed = Date.parse(value);
+    return Number.isNaN(parsed) ? null : parsed;
+  }
+  return null;
+}
+
+function formatResetCountdown(resetsAt: number | string | null | undefined, now: number) {
+  const resetMs = timestampMs(resetsAt);
+  if (!resetMs) return "reset unknown";
+  const remainingMs = resetMs - now;
   if (remainingMs <= 10000) return "resetting";
 
   const totalMinutes = Math.ceil(remainingMs / 60000);
@@ -29,11 +53,33 @@ function formatResetCountdown(resetsAt: number | null | undefined, now: number) 
   return `resets in ${minutes}m`;
 }
 
-function isUsageStale(lastUpdated: number | null | undefined, now: number) {
-  return !!lastUpdated && now - lastUpdated > 15 * 60 * 1000;
+function isUsageStale(lastUpdated: number | string | null | undefined, now: number) {
+  const updatedMs = timestampMs(lastUpdated);
+  return !!updatedMs && now - updatedMs > 15 * 60 * 1000;
 }
 
-function formatVisibleCountdown(window: ClaudeUsageWindow, now: number) {
+function formatStaleness(lastUpdated: number | string | null | undefined, now: number): string | null {
+  const updatedMs = timestampMs(lastUpdated);
+  if (!updatedMs) return null;
+  const ageMs = now - updatedMs;
+  if (ageMs <= 15 * 60 * 1000) return null;
+
+  const minutes = Math.floor(ageMs / 60000);
+  if (minutes < 1) return null;
+  if (minutes < 60) return `as of ${minutes}m ago`;
+
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `as of ${hours}h ago`;
+
+  return `as of ${Math.floor(hours / 24)}d ago`;
+}
+
+function formatVisibleCountdown(
+  window: UsageDisplayWindow,
+  now: number,
+  staleness: string | null,
+) {
+  if (staleness) return staleness;
   return formatResetCountdown(window.resets_at, now).replace(/^resets in /, "");
 }
 
@@ -43,15 +89,23 @@ function usageTier(percent: number) {
   return "";
 }
 
-function UsageWindowGroup({ label, window, now }: { label: string; window: ClaudeUsageWindow; now: number }) {
+function UsageWindowGroup({
+  window,
+  now,
+  staleness,
+}: {
+  window: UsageDisplayWindow;
+  now: number;
+  staleness: string | null;
+}) {
   const percent = Math.max(0, Math.min(100, Math.round(window.used_percentage)));
   const tier = usageTier(percent);
-  const countdown = formatVisibleCountdown(window, now);
+  const countdown = formatVisibleCountdown(window, now, staleness);
 
   return (
-    <div className={`win ${tier}`}>
+    <div className={`win ${tier} ${staleness ? "usage-stale-values" : ""}`}>
       <div className="wtop">
-        <span className="wl">{label}</span>
+        <span className="wl">{window.label}</span>
         <b className="pct">{percent}%</b>
         <span className={`cd ${countdown === "resetting" ? "resetting" : ""}`}>{countdown}</span>
       </div>
@@ -60,26 +114,27 @@ function UsageWindowGroup({ label, window, now }: { label: string; window: Claud
   );
 }
 
-function CompactUsageWindow({ label, window, now }: { label: string; window: ClaudeUsageWindow; now: number }) {
+function CompactUsageWindow({
+  window,
+  now,
+  staleness,
+}: {
+  window: UsageDisplayWindow;
+  now: number;
+  staleness: string | null;
+}) {
   const percent = Math.max(0, Math.min(100, Math.round(window.used_percentage)));
   const tier = usageTier(percent);
-  const countdown = formatVisibleCountdown(window, now);
+  const countdown = formatVisibleCountdown(window, now, staleness);
 
   return (
-    <span className="cwin">
-      <span>{label}</span>
+    <span className={`cwin ${staleness ? "usage-stale-values" : ""}`}>
+      <span>{window.label}</span>
       <b className={tier}>{percent}%</b>
       <span className={`cd ${countdown === "resetting" ? "resetting" : ""}`}>{countdown}</span>
     </span>
   );
 }
-
-type UsageProviderRow = {
-  providerId: string;
-  glyph: ReactNode;
-  fiveHour?: ClaudeUsageWindow | null;
-  sevenDay?: ClaudeUsageWindow | null;
-};
 
 function UsageSection({
   rows,
@@ -94,7 +149,7 @@ function UsageSection({
   compact: boolean;
   onToggleCompact: () => void;
 }) {
-  const visibleRows = rows.filter((row) => row.fiveHour || row.sevenDay);
+  const visibleRows = rows.filter((row) => row.windows.length > 0);
 
   if (visibleRows.length === 0) return null;
 
@@ -106,14 +161,26 @@ function UsageSection({
           <div className="usageBody">
             <div className="usageExpanded" aria-hidden={compact}>
               <span className="pname">{row.providerId}</span>
-              {row.fiveHour ? <UsageWindowGroup label="5h" window={row.fiveHour} now={now} /> : null}
-              {row.fiveHour && row.sevenDay ? <div className="vsep" /> : null}
-              {row.sevenDay ? <UsageWindowGroup label="7d" window={row.sevenDay} now={now} /> : null}
+              {row.windows.map((window, index) => {
+                const staleness = formatStaleness(row.lastUpdated, now);
+                return (
+                  <Fragment key={window.label}>
+                    {index > 0 ? <div className="vsep" /> : null}
+                    <UsageWindowGroup window={window} now={now} staleness={staleness} />
+                  </Fragment>
+                );
+              })}
             </div>
             <span className="usageCompact cline" aria-hidden={!compact}>
-              {row.fiveHour ? <CompactUsageWindow label="5h" window={row.fiveHour} now={now} /> : null}
-              {row.fiveHour && row.sevenDay ? <span className="bsep">|</span> : null}
-              {row.sevenDay ? <CompactUsageWindow label="7d" window={row.sevenDay} now={now} /> : null}
+              {row.windows.map((window, index) => {
+                const staleness = formatStaleness(row.lastUpdated, now);
+                return (
+                  <Fragment key={window.label}>
+                    {index > 0 ? <span className="bsep">|</span> : null}
+                    <CompactUsageWindow window={window} now={now} staleness={staleness} />
+                  </Fragment>
+                );
+              })}
             </span>
           </div>
         </div>
@@ -137,20 +204,32 @@ function aggregateStatus(sessions: Session[]) {
   return parts.length ? parts.join(" - ") : "idle";
 }
 
-function Panel({ sessions, expanded, now, claudeUsage, onClose, onDismiss }: PanelProps) {
+function Panel({ sessions, expanded, now, claudeUsage, codexUsage, onClose, onDismiss }: PanelProps) {
   const [usageCompact, setUsageCompact] = useState(true);
   const usageRows: UsageProviderRow[] = [
     {
       providerId: "Claude",
       glyph: <img src={claudeLogo} alt="" width="14" height="14" style={{ display: "block" }} />,
-      fiveHour: claudeUsage?.five_hour,
-      sevenDay: claudeUsage?.seven_day,
+      windows: [
+        ...(claudeUsage?.five_hour ? [{ ...claudeUsage.five_hour, label: "5h" }] : []),
+        ...(claudeUsage?.seven_day ? [{ ...claudeUsage.seven_day, label: "7d" }] : []),
+      ],
+      lastUpdated: claudeUsage?.last_updated,
     },
     {
       providerId: "OpenAI",
       glyph: <img src={codexLogo} alt="" width="14" height="14" style={{ display: "block" }} />,
+      windows: (codexUsage?.windows ?? []).map((window) => ({
+        label: window.window_label,
+        used_percentage: window.used_percentage,
+        resets_at: window.resets_at,
+      })),
+      lastUpdated: codexUsage?.last_updated,
     },
   ];
+  const stale =
+    isUsageStale(claudeUsage?.last_updated, now) ||
+    ((codexUsage?.windows.length ?? 0) > 0 && isUsageStale(codexUsage?.last_updated, now));
 
   return (
     <aside className={`panel ${expanded ? "open" : ""}`} aria-hidden={!expanded}>
@@ -164,7 +243,7 @@ function Panel({ sessions, expanded, now, claudeUsage, onClose, onDismiss }: Pan
       <UsageSection
         rows={usageRows}
         now={now}
-        stale={isUsageStale(claudeUsage?.last_updated, now)}
+        stale={stale}
         compact={usageCompact}
         onToggleCompact={() => setUsageCompact((current) => !current)}
       />

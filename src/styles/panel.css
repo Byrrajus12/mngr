@@ -98,6 +98,10 @@
   opacity: .72;
 }
 
+.usage-stale-values {
+  opacity: .5;
+}
+
 .usage.compact {
   display: flex;
   flex-wrap: wrap;

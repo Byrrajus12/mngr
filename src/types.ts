@@ -64,3 +64,14 @@ export type ClaudeUsageState = {
   seven_day?: ClaudeUsageWindow | null;
   last_updated?: number | null;
 };
+
+export interface CodexUsageWindow {
+  used_percentage: number;
+  resets_at: string | null;
+  window_label: string;
+}
+
+export interface CodexUsageState {
+  windows: CodexUsageWindow[];
+  last_updated: string | null;
+}

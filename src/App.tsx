@@ -5,7 +5,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import DemoPanel from "./components/DemoPanel";
 import Filament from "./components/Filament";
 import Panel from "./components/Panel";
-import type { ClaudeUsageState, Session, SessionStatus } from "./types";
+import type { ClaudeUsageState, CodexUsageState, Session, SessionStatus } from "./types";
 
 type WindowMode = "collapsed" | "peek" | "expanded";
 type PeekReason = "hover" | "attention" | null;
@@ -33,6 +33,7 @@ function App() {
   const [dismissed, setDismissed] = useState<Set<string>>(() => new Set());
   const [now, setNow] = useState(() => Date.now());
   const [claudeUsage, setClaudeUsage] = useState<ClaudeUsageState | null>(null);
+  const [codexUsage, setCodexUsage] = useState<CodexUsageState | null>(null);
 
   const leaveTimer = useRef<number | undefined>(undefined);
   const demoId = useRef(1);
@@ -115,13 +116,22 @@ function App() {
           if (alive) setClaudeUsage(usage);
         })
         .catch((error) => console.error("get_claude_usage failed", error));
+      invoke<CodexUsageState>("get_codex_usage")
+        .then((usage) => {
+          if (alive) setCodexUsage(usage);
+        })
+        .catch((error) => console.error("get_codex_usage failed", error));
     }
 
     refreshUsage();
     const timer = window.setInterval(refreshUsage, 5000);
+    const unlistenClaudeUsage = listen<ClaudeUsageState>("claude-usage-updated", (event) => {
+      if (alive) setClaudeUsage(event.payload);
+    });
     return () => {
       alive = false;
       window.clearInterval(timer);
+      unlistenClaudeUsage.then((dispose) => dispose());
     };
   }, []);
 
@@ -378,6 +388,7 @@ function App() {
         expanded={mode === "expanded"}
         now={now}
         claudeUsage={claudeUsage}
+        codexUsage={codexUsage}
         onClose={collapse}
         onDismiss={dismissSession}
       />
