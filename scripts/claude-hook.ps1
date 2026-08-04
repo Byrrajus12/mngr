@@ -152,6 +152,13 @@ try {
   exit 0
 }
 
+if ($mngrPayload.hook_event_name -eq "PermissionRequest") {
+  $mode = $mngrPayload.permission_mode
+  if ($mode -eq "bypassPermissions" -or $mode -eq "acceptEdits") {
+    exit 0
+  }
+}
+
 if ($env:MNGR_HOOK_TEST_MODE -eq "payload") {
   $mngrPayload | ConvertTo-Json -Compress -Depth 100
   exit 0
@@ -167,6 +174,7 @@ if ($env:MNGR_HOOK_TEST_MODE -eq "permission-output") {
 
 $jsonLine = ($mngrPayload | ConvertTo-Json -Compress -Depth 100)
 
+$pipeWriteSucceeded = $false
 try {
   $client = [System.IO.Pipes.NamedPipeClientStream]::new(".", "mngr", [System.IO.Pipes.PipeDirection]::Out)
   $client.Connect(50)
@@ -174,12 +182,15 @@ try {
   $pipeBytes = $Utf8NoBom.GetBytes($jsonLine + "`n")
   $client.Write($pipeBytes, 0, $pipeBytes.Length)
   $client.Flush()
-  $client.Dispose()
+  $pipeWriteSucceeded = $true
 } catch {
-  exit 0
+} finally {
+  if ($null -ne $client) {
+    $client.Dispose()
+  }
 }
 
-if ($mngrPayload.hook_event_name -ne "PermissionRequest") {
+if (($mngrPayload.hook_event_name -ne "PermissionRequest") -or (-not $pipeWriteSucceeded)) {
   exit 0
 }
 
