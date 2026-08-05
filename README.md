@@ -2,7 +2,7 @@
 
 Windows desktop overlay for monitoring and controlling AI coding agents. Sits on the edge of your screen as a slim rail, notifies you when your agent needs you, expands into a panel that sees all of your sessions and lets you interact with them, monitor usage, and open the exact session.
 
-<!-- TODO: screenshot of mngr panel with active sessions -->
+<video src="src/assets/overview.mp4" autoplay loop muted playsinline></video>
 
 <!-- TODO: GIF showing permission approval flow -->
 
