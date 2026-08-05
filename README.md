@@ -2,7 +2,7 @@
 
 Windows desktop overlay for monitoring and controlling AI coding agents. Sits on the edge of your screen as a slim rail, notifies you when your agent needs you, expands into a panel that sees all of your sessions and lets you interact with them, monitor usage, and open the exact session.
 
-<video src="src/assets/overview.mp4" autoplay loop muted playsinline></video>
+<img width="920" height="518" alt="overview" src="https://github.com/user-attachments/assets/03f45a8d-18d1-4756-adaf-4ce4e3236d39" />
 
 <!-- TODO: GIF showing permission approval flow -->
 
