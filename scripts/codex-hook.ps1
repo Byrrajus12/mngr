@@ -8,7 +8,6 @@ function ConvertTo-MngrHookPayload {
   param([string]$PayloadText)
 
   $hook = $PayloadText | ConvertFrom-Json
-  Add-Content "$env:LOCALAPPDATA\mngr\hook-events.log" "$(Get-Date -Format o) codex $($hook.hook_event_name)"
   $hook | Add-Member -NotePropertyName "agent_type" -NotePropertyValue "codex" -Force
   if ($hook.hook_event_name -eq "PermissionRequest") {
     $requestId = [guid]::NewGuid().ToString()
@@ -104,11 +103,6 @@ function ConvertTo-CodexPermissionOutput {
 }
 
 $payload = Read-MngrUtf8Stdin
-$logDir = Join-Path $env:LOCALAPPDATA "mngr"
-if (!(Test-Path $logDir)) { New-Item -ItemType Directory -Force -Path $logDir | Out-Null }
-$logPath = Join-Path $logDir "codex-hook-events.log"
-$timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss.fff"
-Add-Content -LiteralPath $logPath -Value "$timestamp raw_stdin_length=$($Utf8NoBom.GetByteCount($payload))"
 if ([string]::IsNullOrWhiteSpace($payload)) {
   exit 0
 }
@@ -120,9 +114,7 @@ try {
 }
 
 $event = $mngrPayload.hook_event_name
-Add-Content -LiteralPath $logPath -Value "$timestamp event=$event session=$($mngrPayload.session_id)"
 if ($event -eq "PermissionRequest") {
-  Add-Content -LiteralPath $logPath -Value "$timestamp permission_mode=$($mngrPayload.permission_mode)"
   $mode = $mngrPayload.permission_mode
   if ($mode -eq "bypassPermissions" -or $mode -eq "none" -or $mode -eq "never") {
     exit 0

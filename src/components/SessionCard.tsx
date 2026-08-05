@@ -315,7 +315,6 @@ function SessionCard({ session, index, now, onDismiss }: SessionCardProps) {
 
   async function handleJumpToTerminal() {
     if (isDemo) {
-      console.log("jump", session.session_id);
       return;
     }
 
@@ -328,7 +327,6 @@ function SessionCard({ session, index, now, onDismiss }: SessionCardProps) {
   }
   function handleAllow(updatedPermissions?: PermissionSuggestion[]) {
     if (isDemo) {
-      console.log("mngr allow clicked", session.session_id, updatedPermissions);
       setResolved("Allowed - resuming");
       return;
     }
@@ -338,7 +336,6 @@ function SessionCard({ session, index, now, onDismiss }: SessionCardProps) {
 
   function handleDeny() {
     if (isDemo) {
-      console.log("mngr deny clicked", session.session_id);
       setResolved("Denied - resuming");
       return;
     }
@@ -366,7 +363,6 @@ function SessionCard({ session, index, now, onDismiss }: SessionCardProps) {
 
   function handleQuestionAnswer(question: string, answer: string) {
     if (isDemo || !pendingQuestion) {
-      console.log("question option", answer, session.session_id);
       setResolved(`-> ${answer}`);
       return;
     }

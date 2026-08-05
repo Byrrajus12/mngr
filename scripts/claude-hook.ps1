@@ -8,7 +8,6 @@ function ConvertTo-MngrHookPayload {
   param([string]$PayloadText)
 
   $hook = $PayloadText | ConvertFrom-Json
-  Add-Content "$env:LOCALAPPDATA\mngr\hook-events.log" "$(Get-Date -Format o) $($hook.hook_event_name)"
   if ($hook.hook_event_name -eq "PermissionRequest") {
     $requestId = [guid]::NewGuid().ToString()
     $hook | Add-Member -NotePropertyName "request_id" -NotePropertyValue $requestId -Force
