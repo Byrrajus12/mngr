@@ -11,6 +11,7 @@ type PanelProps = {
   now: number;
   claudeUsage: ClaudeUsageState | null;
   codexUsage: CodexUsageState | null;
+  firstLaunchOverlay?: ReactNode;
   onClose: () => void;
   onDismiss: (id: string) => void;
 };
@@ -204,7 +205,16 @@ function aggregateStatus(sessions: Session[]) {
   return parts.length ? parts.join(" - ") : "idle";
 }
 
-function Panel({ sessions, expanded, now, claudeUsage, codexUsage, onClose, onDismiss }: PanelProps) {
+function Panel({
+  sessions,
+  expanded,
+  now,
+  claudeUsage,
+  codexUsage,
+  firstLaunchOverlay,
+  onClose,
+  onDismiss,
+}: PanelProps) {
   const [usageCompact, setUsageCompact] = useState(true);
   const usageRows: UsageProviderRow[] = [
     {
@@ -232,7 +242,7 @@ function Panel({ sessions, expanded, now, claudeUsage, codexUsage, onClose, onDi
     ((codexUsage?.windows.length ?? 0) > 0 && isUsageStale(codexUsage?.last_updated, now));
 
   return (
-    <aside className={`panel ${expanded ? "open" : ""}`} aria-hidden={!expanded}>
+    <aside className={`panel ${expanded ? "open" : ""} ${firstLaunchOverlay ? "onboarding" : ""}`} aria-hidden={!expanded}>
       <header className="phead">
         <div>
           <div className="wm">mngr</div>
@@ -263,6 +273,7 @@ function Panel({ sessions, expanded, now, claudeUsage, codexUsage, onClose, onDi
           ))
         )}
       </section>
+      {firstLaunchOverlay}
     </aside>
   );
 }

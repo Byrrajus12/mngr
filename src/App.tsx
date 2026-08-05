@@ -10,7 +10,13 @@ import type { ClaudeUsageState, CodexUsageState, Session, SessionStatus } from "
 type WindowMode = "collapsed" | "peek" | "expanded";
 type PeekReason = "hover" | "attention" | null;
 
+type AppConfig = {
+  start_at_login: boolean;
+  first_launch_completed: boolean;
+};
+
 const DEMO_PROJECTS = ["mngr", "api-server", "web-ui", "dotfiles", "infra"];
+const SHOW_DEMO_TOOLS = import.meta.env.DEV;
 
 async function setWindowMode(mode: WindowMode) {
   if (mode === "expanded") await invoke("expand_panel");
@@ -34,6 +40,10 @@ function App() {
   const [now, setNow] = useState(() => Date.now());
   const [claudeUsage, setClaudeUsage] = useState<ClaudeUsageState | null>(null);
   const [codexUsage, setCodexUsage] = useState<CodexUsageState | null>(null);
+  const [showFirstLaunch, setShowFirstLaunch] = useState(false);
+  const [startAtLogin, setStartAtLogin] = useState(false);
+  const [savingFirstLaunch, setSavingFirstLaunch] = useState(false);
+  const [firstLaunchError, setFirstLaunchError] = useState<string | null>(null);
 
   const leaveTimer = useRef<number | undefined>(undefined);
   const demoId = useRef(1);
@@ -41,6 +51,7 @@ function App() {
   const hoveredRef = useRef(false);
   const prevStatusRef = useRef<Map<string, SessionStatus>>(new Map());
   const flashTimers = useRef<Map<string, number>>(new Map());
+  const blurTimer = useRef<number | undefined>(undefined);
 
   useEffect(() => {
     modeRef.current = mode;
@@ -54,6 +65,7 @@ function App() {
 
   async function collapse() {
     window.clearTimeout(leaveTimer.current);
+    window.clearTimeout(blurTimer.current);
     await setWindowMode("collapsed");
     setPeekReason(null);
     setMode("collapsed");
@@ -70,6 +82,7 @@ function App() {
 
   async function expand() {
     window.clearTimeout(leaveTimer.current);
+    window.clearTimeout(blurTimer.current);
     await setWindowMode("expanded");
     setMode("expanded");
   }
@@ -138,9 +151,13 @@ function App() {
   // Click-outside-closes: Rust emits window-blurred on focus loss.
   useEffect(() => {
     const unlisten = listen("window-blurred", () => {
-      if (modeRef.current === "expanded") collapse();
+      window.clearTimeout(blurTimer.current);
+      blurTimer.current = window.setTimeout(() => {
+        if (modeRef.current === "expanded") collapse();
+      }, 120);
     });
     return () => {
+      window.clearTimeout(blurTimer.current);
       unlisten.then((dispose) => dispose());
     };
   }, []);
@@ -151,6 +168,38 @@ function App() {
     }
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
+  }, []);
+
+  useEffect(() => {
+    const unlistenShow = listen("tray-show-panel", () => {
+      window.clearTimeout(blurTimer.current);
+      expand();
+    });
+    const unlistenToggle = listen("tray-toggle-panel", () => {
+      window.clearTimeout(blurTimer.current);
+      if (modeRef.current === "expanded") {
+        collapse();
+      } else {
+        expand();
+      }
+    });
+    return () => {
+      unlistenShow.then((dispose) => dispose());
+      unlistenToggle.then((dispose) => dispose());
+    };
+  }, []);
+
+  useEffect(() => {
+    invoke<AppConfig>("get_config")
+      .then((config) => {
+        setStartAtLogin(config.start_at_login);
+        if (!config.first_launch_completed) {
+          setShowFirstLaunch(true);
+          expand();
+        }
+      })
+      .catch((error) => console.error("get_config failed", error));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Cursor stream from the Rust watcher drives click-through: the window is
@@ -165,7 +214,7 @@ function App() {
     const unlisten = listen<{ x: number; y: number }>("cursor-pos", (event) => {
       const { x, y } = event.payload;
       const el = document.elementFromPoint(x, y);
-      const interactive = !!el?.closest(".filament, .panel, .demoPanel");
+      const interactive = !!el?.closest(SHOW_DEMO_TOOLS ? ".filament, .panel, .demoPanel" : ".filament, .panel");
       const shouldIgnore = !interactive;
 
       if (ignoringRef.current !== shouldIgnore) {
@@ -182,7 +231,10 @@ function App() {
     };
   }, []);
 
-  const allSessions = useMemo(() => [...sessions, ...demoSessions], [demoSessions, sessions]);
+  const allSessions = useMemo(
+    () => (SHOW_DEMO_TOOLS ? [...sessions, ...demoSessions] : sessions),
+    [demoSessions, sessions],
+  );
 
   useEffect(() => {
     const sessionById = new Map(allSessions.map((session) => [session.session_id, session]));
@@ -318,6 +370,48 @@ function App() {
     }
   }
 
+  async function completeFirstLaunch() {
+    const nextConfig: AppConfig = {
+      start_at_login: startAtLogin,
+      first_launch_completed: true,
+    };
+
+    setSavingFirstLaunch(true);
+    setFirstLaunchError(null);
+    try {
+      await invoke<AppConfig>("set_config", { config: nextConfig });
+      setShowFirstLaunch(false);
+    } catch (error) {
+      console.error("set_config failed", error);
+      setFirstLaunchError("Couldn't save that preference. Try again.");
+    } finally {
+      setSavingFirstLaunch(false);
+    }
+  }
+
+  const firstLaunchOverlay = showFirstLaunch ? (
+    <div className="firstLaunchOverlay" role="dialog" aria-modal="true" aria-labelledby="first-launch-title">
+      <div className="firstLaunchCard">
+        <h2 id="first-launch-title">Welcome to mngr</h2>
+        <p>Hooks have been installed for Claude Code and Codex.</p>
+        <p>Your coding agent sessions will appear here automatically.</p>
+        <p>For Codex CLI: trust the hooks by running /hooks inside any Codex session.</p>
+        <label className="firstLaunchCheck">
+          <input
+            type="checkbox"
+            checked={startAtLogin}
+            onChange={(event) => setStartAtLogin(event.currentTarget.checked)}
+          />
+          <span>Start mngr at login</span>
+        </label>
+        {firstLaunchError ? <div className="firstLaunchError">{firstLaunchError}</div> : null}
+        <button className="firstLaunchButton" type="button" disabled={savingFirstLaunch} onClick={completeFirstLaunch}>
+          {savingFirstLaunch ? "Saving" : "Got it"}
+        </button>
+      </div>
+    </div>
+  ) : null;
+
   function updateRandomWorkingDemoSession(update: (session: Session) => Session) {
     setDemoSessions((current) => {
       const working = current
@@ -389,6 +483,7 @@ function App() {
         now={now}
         claudeUsage={claudeUsage}
         codexUsage={codexUsage}
+        firstLaunchOverlay={firstLaunchOverlay}
         onClose={collapse}
         onDismiss={dismissSession}
       />
@@ -402,7 +497,7 @@ function App() {
         onPeek={handlePeek}
         onUnpeek={handleUnpeek}
       />
-      {import.meta.env.DEV ? (
+      {SHOW_DEMO_TOOLS ? (
         <DemoPanel
           agentCount={demoSessions.length}
           onAddAgent={addDemoSession}

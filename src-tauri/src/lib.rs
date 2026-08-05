@@ -6,9 +6,17 @@ use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io::{ErrorKind, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+#[cfg(windows)]
+use std::process::Command;
+#[cfg(windows)]
+use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tauri::{Emitter, Manager, PhysicalPosition, PhysicalSize, State};
+use tauri::{
+    menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    Emitter, Manager, PhysicalPosition, PhysicalSize, State,
+};
 use tokio::time::{sleep, Duration};
 
 const PIPE_NAME: &str = r"\\.\pipe\mngr";
@@ -20,6 +28,10 @@ const STATUS_LINE_ORIGINAL_COMMAND_NAME: &str = "claude-statusline-original.txt"
 const MNGR_ORIGINAL_STATUS_LINE_KEY: &str = "_mngrOriginalStatusLine";
 const STATUS_LINE_REFRESH_INTERVAL_MS: u64 = 5000;
 const CODEX_HOOK_SCRIPT_NAME: &str = "codex-hook.ps1";
+const CONFIG_FILE_NAME: &str = "config.json";
+const START_AT_LOGIN_MENU_ID: &str = "start_at_login";
+const RUN_KEY_PATH: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
+const RUN_VALUE_NAME: &str = "mngr";
 const CODEX_EVENTS: &[&str] = &[
     "SessionStart",
     "PreToolUse",
@@ -569,6 +581,25 @@ impl Session {
 
 pub struct SessionStore(Arc<Mutex<SessionManager>>);
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AppConfig {
+    pub start_at_login: bool,
+    pub first_launch_completed: bool,
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self {
+            start_at_login: false,
+            first_launch_completed: false,
+        }
+    }
+}
+
+pub struct TrayMenuState {
+    start_at_login_item: Mutex<Option<CheckMenuItem<tauri::Wry>>>,
+}
+
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1032,6 +1063,19 @@ fn resolve_desktop_session_uuid_in_background(
 fn get_sessions(store: State<'_, SessionStore>) -> Vec<Session> {
     let mut manager = store.0.lock().expect("session manager mutex poisoned");
     manager.snapshot()
+}
+
+#[tauri::command]
+fn get_config() -> Result<AppConfig, String> {
+    read_app_config().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn set_config(app: tauri::AppHandle, config: AppConfig) -> Result<AppConfig, String> {
+    apply_start_at_login(config.start_at_login).map_err(|error| error.to_string())?;
+    write_app_config(&config).map_err(|error| error.to_string())?;
+    sync_tray_start_at_login(&app, config.start_at_login);
+    Ok(config)
 }
 
 #[cfg(windows)]
@@ -1729,6 +1773,82 @@ fn claude_usage_cache_path() -> PathBuf {
     local_app_data_dir().join("mngr").join("claude-usage.json")
 }
 
+fn config_path() -> PathBuf {
+    local_app_data_dir().join("mngr").join(CONFIG_FILE_NAME)
+}
+
+fn read_app_config() -> Result<AppConfig, std::io::Error> {
+    let path = config_path();
+    if !path.exists() {
+        return Ok(AppConfig::default());
+    }
+
+    let contents = fs::read_to_string(path)?;
+    let config = serde_json::from_str::<AppConfig>(&contents).unwrap_or_default();
+    Ok(config)
+}
+
+fn write_app_config(config: &AppConfig) -> Result<(), std::io::Error> {
+    let path = config_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let contents = serde_json::to_string_pretty(config)
+        .map_err(|error| std::io::Error::new(ErrorKind::InvalidData, error))?;
+    fs::write(path, contents.as_bytes())
+}
+
+fn sync_tray_start_at_login(app: &tauri::AppHandle, enabled: bool) {
+    let state = app.state::<TrayMenuState>();
+    let item = state
+        .start_at_login_item
+        .lock()
+        .expect("tray menu state mutex poisoned")
+        .clone();
+    if let Some(item) = item {
+        let _ = item.set_checked(enabled);
+    }
+}
+
+#[cfg(windows)]
+fn apply_start_at_login(enabled: bool) -> Result<(), std::io::Error> {
+    if enabled {
+        let exe = std::env::current_exe()?;
+        let command = format!("\"{}\"", exe.display());
+        let status = Command::new("reg")
+            .args([
+                "add",
+                RUN_KEY_PATH,
+                "/v",
+                RUN_VALUE_NAME,
+                "/t",
+                "REG_SZ",
+                "/d",
+                &command,
+                "/f",
+            ])
+            .stderr(Stdio::null())
+            .status()?;
+        if !status.success() {
+            return Err(std::io::Error::new(
+                ErrorKind::Other,
+                "failed to write Windows Run registry entry",
+            ));
+        }
+    } else {
+        let _status = Command::new("reg")
+            .args(["delete", RUN_KEY_PATH, "/v", RUN_VALUE_NAME, "/f"])
+            .stderr(Stdio::null())
+            .status()?;
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn apply_start_at_login(_enabled: bool) -> Result<(), std::io::Error> {
+    Ok(())
+}
+
 fn read_claude_usage_cache(path: &Path) -> Result<ClaudeUsageState, std::io::Error> {
     if !path.exists() {
         return Ok(ClaudeUsageState::empty());
@@ -2217,11 +2337,85 @@ fn cleanup_responses_dir(responses_dir: &Path, now: SystemTime) -> std::io::Resu
     Ok(())
 }
 
+fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
+    let config = read_app_config().unwrap_or_default();
+    let show_item = MenuItem::with_id(app, "show", "Show", true, None::<&str>)?;
+    let start_at_login_item = CheckMenuItem::with_id(
+        app,
+        START_AT_LOGIN_MENU_ID,
+        "Start at login",
+        true,
+        config.start_at_login,
+        None::<&str>,
+    )?;
+    let separator = PredefinedMenuItem::separator(app)?;
+    let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+    let menu = Menu::with_items(
+        app,
+        &[&show_item, &start_at_login_item, &separator, &quit_item],
+    )?;
+
+    {
+        let state = app.state::<TrayMenuState>();
+        *state
+            .start_at_login_item
+            .lock()
+            .expect("tray menu state mutex poisoned") = Some(start_at_login_item.clone());
+    }
+
+    let icon = tauri::image::Image::from_bytes(include_bytes!("../icons/tray-icon.png"))?;
+    let start_at_login_for_menu = start_at_login_item.clone();
+
+    TrayIconBuilder::with_id("mngr-tray")
+        .icon(icon)
+        .tooltip("mngr")
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(move |app, event| match event.id().as_ref() {
+            "show" => {
+                let _ = app.emit("tray-show-panel", ());
+            }
+            START_AT_LOGIN_MENU_ID => {
+                let mut config = read_app_config().unwrap_or_default();
+                config.start_at_login = !config.start_at_login;
+                if let Err(error) = apply_start_at_login(config.start_at_login) {
+                    eprintln!("failed to update start-at-login registry entry: {error}");
+                    return;
+                }
+                if let Err(error) = write_app_config(&config) {
+                    eprintln!("failed to save start-at-login preference: {error}");
+                    return;
+                }
+                let _ = start_at_login_for_menu.set_checked(config.start_at_login);
+            }
+            "quit" => {
+                app.exit(0);
+            }
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                let _ = tray.app_handle().emit("tray-toggle-panel", ());
+            }
+        })
+        .build(app)?;
+
+    Ok(())
+}
+
 pub fn run() {
     tauri::Builder::default()
         .manage(SessionStore(Arc::new(
             Mutex::new(SessionManager::default()),
         )))
+        .manage(TrayMenuState {
+            start_at_login_item: Mutex::new(None),
+        })
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Focused(false) = event {
                 let _ = window.emit("window-blurred", ());
@@ -2230,6 +2424,14 @@ pub fn run() {
         .setup(|app| {
             if let Err(error) = cleanup_responses_dir(&responses_dir(), SystemTime::now()) {
                 eprintln!("failed to prepare approval response dir: {error}");
+            }
+            if let Err(error) =
+                apply_start_at_login(read_app_config().unwrap_or_default().start_at_login)
+            {
+                eprintln!("failed to sync start-at-login preference: {error}");
+            }
+            if let Err(error) = setup_tray(app) {
+                eprintln!("failed to create system tray icon: {error}");
             }
             if let Err(error) = install_claude_hooks_inner() {
                 eprintln!("failed to install Claude Code integration: {error}");
@@ -2251,6 +2453,8 @@ pub fn run() {
             install_codex_hooks,
             get_claude_usage,
             get_codex_usage,
+            get_config,
+            set_config,
             jump_to_claude_desktop_session,
             jump_to_session,
             jump_to_terminal,
