@@ -68,10 +68,20 @@
 }
 
 .wm {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   color: var(--ink);
   font: 700 12px var(--mono);
   letter-spacing: .14em;
   text-transform: uppercase;
+}
+
+.wm img {
+  display: block;
+  height: 24px;
+  width: auto;
+  flex: none;
 }
 
 .agg {

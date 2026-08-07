@@ -1,5 +1,6 @@
 import { Fragment, type ReactNode } from "react";
 import { useState } from "react";
+import mngrMark from "../assets/mngr/mngr-mark-light-1024.svg";
 import claudeLogo from "../assets/providers/claude.svg";
 import codexLogo from "../assets/providers/codex.svg";
 import type { ClaudeUsageState, CodexUsageState, Session } from "../types";
@@ -245,7 +246,10 @@ function Panel({
     <aside className={`panel ${expanded ? "open" : ""} ${firstLaunchOverlay ? "onboarding" : ""}`} aria-hidden={!expanded}>
       <header className="phead">
         <div>
-          <div className="wm">mngr</div>
+          <div className="wm">
+            <img src={mngrMark} alt="" />
+            <span>mngr</span>
+          </div>
           <div className="agg">{aggregateStatus(sessions)}</div>
         </div>
         <button className="pclose" type="button" onClick={onClose}>esc</button>
