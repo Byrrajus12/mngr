@@ -1,8 +1,7 @@
-<p align="center">
-  <img src="src/assets/mngr/mark-dark.svg" alt="mngr" width="80" />
-</p>
-
-# mngr
+<h1 align="center">
+  <img src="src/assets/mngr/mark-dark.svg" width="64" height="64" alt="mngr icon" valign="middle">&nbsp;
+  MNGR
+</h1>
 
 Windows desktop overlay for monitoring and controlling AI coding agents. Sits on the edge of your screen as a slim rail, notifies you when your agent needs you, expands into a panel that sees all of your sessions and lets you interact with them, monitor usage, and open the exact session.
 
